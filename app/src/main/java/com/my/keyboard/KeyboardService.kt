@@ -23,6 +23,7 @@ import android.view.SoundEffectConstants
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -38,9 +39,10 @@ class KeyboardService : InputMethodService() {
     private var mode = 0 // 0 = অক্ষর, 1 = symbol 1/2, 2 = symbol 2/2
     private var bnPage = 0
     private var dark = false
-    private var panel = 0 // 0 = নেই, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings
+    private var panel = 0 // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more
     private var emojiCat = 1
     private var selecting = false
+    private var toolsOpen = false
 
     private var themeMode = 0
     private var heightSet = 1
@@ -55,7 +57,11 @@ class KeyboardService : InputMethodService() {
     private val emojiCache = HashMap<Int, List<String>>()
     private val learned = HashMap<String, Int>()
     private var learnedLoaded = false
-    private val clips = ArrayList<String>()
+
+    private class Clip(var text: String, var locked: Boolean)
+
+    private val clips = ArrayList<Clip>()
+    private var menuClip: Clip? = null
 
     private val enRows = listOf(
         "1 2 3 4 5 6 7 8 9 0",
@@ -87,7 +93,7 @@ class KeyboardService : InputMethodService() {
         listOf("১ ২ ৩ ৪ ৫ ৬ ৭ ৮ ৯ ০", "৲ ৳ \\ | < > { } [ ]", "ঽ ৺ ° । ॥ ‘ ’ “ ” …", "ZWNJ|\u200C ZWJ|\u200D ¤ ॐ + ~ `")
     )
 
-    // ================= আইকন (হাতে আঁকা) =================
+    // ================= Icons (drawn by hand) =================
     private inner class IconView(val kind: Int) : View(this@KeyboardService) {
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         private val q = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -105,7 +111,32 @@ class KeyboardService : InputMethodService() {
             q.isAntiAlias = true
             q.color = bgColor()
             when (kind) {
-                1 -> { // স্মাইলি
+                0 -> { // T with circular arrows
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 2f * u
+                    val r = 10f * u
+                    canvas.drawArc(RectF(cx - r, cy - r, cx + r, cy + r), 205f, 110f, false, p)
+                    canvas.drawArc(RectF(cx - r, cy - r, cx + r, cy + r), 25f, 110f, false, p)
+                    p.style = Paint.Style.FILL
+                    for (start in floatArrayOf(205f, 25f)) {
+                        val e = Math.toRadians((start + 110f).toDouble())
+                        val nx = Math.cos(e).toFloat()
+                        val ny = Math.sin(e).toFloat()
+                        val ex = cx + r * nx
+                        val ey = cy + r * ny
+                        val path = Path()
+                        path.moveTo(ex + nx * 3.2f * u, ey + ny * 3.2f * u)
+                        path.lineTo(ex - nx * 3.2f * u, ey - ny * 3.2f * u)
+                        path.lineTo(ex - ny * 4.5f * u, ey + nx * 4.5f * u)
+                        path.close()
+                        canvas.drawPath(path, p)
+                    }
+                    p.textAlign = Paint.Align.CENTER
+                    p.textSize = 12f * u
+                    p.isFakeBoldText = true
+                    canvas.drawText("T", cx, cy + 4.2f * u, p)
+                }
+                1 -> { // smiley
                     canvas.drawCircle(cx, cy, 11f * u, p)
                     q.style = Paint.Style.FILL
                     canvas.drawCircle(cx - 4f * u, cy - 3f * u, 1.7f * u, q)
@@ -134,7 +165,7 @@ class KeyboardService : InputMethodService() {
                     canvas.drawLine(cx - 4.5f * u, cy + 3f * u, cx + 4.5f * u, cy + 3f * u, q)
                     canvas.drawLine(cx - 4.5f * u, cy + 7f * u, cx + 1.5f * u, cy + 7f * u, q)
                 }
-                3 -> { // চার তীর
+                3 -> { // four arrows
                     val path = Path()
                     path.moveTo(cx, cy - 11f * u)
                     path.lineTo(cx - 4f * u, cy - 6f * u)
@@ -154,19 +185,30 @@ class KeyboardService : InputMethodService() {
                     path.close()
                     canvas.drawPath(path, p)
                 }
-                else -> { // তিন বিন্দু
+                4 -> { // three dots
                     canvas.drawCircle(cx - 8f * u, cy, 2.2f * u, p)
                     canvas.drawCircle(cx, cy, 2.2f * u, p)
                     canvas.drawCircle(cx + 8f * u, cy, 2.2f * u, p)
+                }
+                else -> { // chevron down
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 2.4f * u
+                    p.strokeCap = Paint.Cap.ROUND
+                    p.strokeJoin = Paint.Join.ROUND
+                    val path = Path()
+                    path.moveTo(cx - 7f * u, cy - 3f * u)
+                    path.lineTo(cx, cy + 4f * u)
+                    path.lineTo(cx + 7f * u, cy - 3f * u)
+                    canvas.drawPath(path, p)
                 }
             }
         }
     }
 
-    private fun iconKey(kind: Int, onTap: () -> Unit): View {
+    private fun iconKey(kind: Int, weight: Float = 1f, onTap: () -> Unit): View {
         val v = IconView(kind)
         v.background = bg(0)
-        v.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+        v.layoutParams = LinearLayout.LayoutParams(0, dp(40), weight).apply {
             setMargins(dp(2), dp(3), dp(2), dp(3))
         }
         v.setOnClickListener {
@@ -257,22 +299,22 @@ class KeyboardService : InputMethodService() {
     private fun refreshSuggestions() {
         val box = sugBox ?: return
         box.removeAllViews()
-        val list = if (panel != 0 || !suggestOn) emptyList() else candidates()
+        val list = if (panel != 0 || !suggestOn || toolsOpen) emptyList() else candidates()
         if (list.isEmpty()) {
             box.addView(iconKey(1) {
-                panel = 1
-                render()
-            })
-            box.addView(iconKey(2) {
-                panel = 2
+                panel = if (panel == 1) 0 else 1
                 render()
             })
             box.addView(iconKey(3) {
-                panel = 3
+                panel = if (panel == 3) 0 else 3
+                render()
+            })
+            box.addView(iconKey(2) {
+                panel = if (panel == 2) 0 else 2
                 render()
             })
             box.addView(iconKey(4) {
-                panel = 4
+                panel = if (panel == 5) 0 else 5
                 render()
             })
             return
@@ -305,10 +347,13 @@ class KeyboardService : InputMethodService() {
         refreshSuggestions()
     }
 
-    // ================= Clipboard =================
+    // ================= Clipboard data =================
     private fun saveClips() {
         getSharedPreferences("kb", MODE_PRIVATE).edit()
-            .putString("clips", clips.joinToString("\u001F"))
+            .putString(
+                "clips2",
+                clips.joinToString("\u001F") { (if (it.locked) "L" else "U") + it.text }
+            )
             .apply()
     }
 
@@ -322,9 +367,18 @@ class KeyboardService : InputMethodService() {
             ) return
             val t = c.getItemAt(0).coerceToText(this)?.toString() ?: return
             if (t.isBlank() || t.length > 2000) return
-            clips.remove(t)
-            clips.add(0, t)
-            while (clips.size > 20) clips.removeAt(clips.size - 1)
+            val existing = clips.firstOrNull { it.text == t }
+            if (existing != null) {
+                if (!existing.locked) {
+                    clips.remove(existing)
+                    clips.add(0, existing)
+                }
+            } else {
+                clips.add(0, Clip(t, false))
+                while (clips.count { !it.locked } > 20) {
+                    clips.removeAt(clips.indexOfLast { !it.locked })
+                }
+            }
             saveClips()
         } catch (e: Exception) {
         }
@@ -411,7 +465,7 @@ class KeyboardService : InputMethodService() {
             if (cat == 9) buildFlags() else buildEmojis(emojiRanges[cat - 1])
         }
 
-    // ================= রং ও মাপ =================
+    // ================= Colors and sizes =================
     private fun bgColor() = if (dark) 0xFF1B1B1B.toInt() else 0xFFDADADA.toInt()
     private fun keyBg() = if (dark) 0xFF3C3C3C.toInt() else 0xFFFFFFFF.toInt()
     private fun fnBg() = if (dark) 0xFF2A2A2A.toInt() else 0xFFEBEBEB.toInt()
@@ -438,8 +492,12 @@ class KeyboardService : InputMethodService() {
         sound = p.getInt("sound", 0) == 1
         suggestOn = p.getInt("suggest", 1) == 1
         oneHand = p.getInt("onehand", 0)
-        val saved = p.getString("clips", "") ?: ""
-        if (saved.isNotEmpty()) clips.addAll(saved.split("\u001F").filter { it.isNotEmpty() })
+        val saved = p.getString("clips2", "") ?: ""
+        if (saved.isNotEmpty()) {
+            for (s in saved.split("\u001F")) {
+                if (s.length > 1) clips.add(Clip(s.substring(1), s[0] == 'L'))
+            }
+        }
         try {
             val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             cm.addPrimaryClipChangedListener { recordClip() }
@@ -460,6 +518,7 @@ class KeyboardService : InputMethodService() {
         if (::root.isInitialized) {
             panel = 0
             selecting = false
+            toolsOpen = false
             render()
         }
     }
@@ -490,11 +549,14 @@ class KeyboardService : InputMethodService() {
         root.setBackgroundColor(bgColor())
         root.removeAllViews()
         sugBox = null
+        if (panel != 2) menuClip = null
+        if (panel != 3) selecting = false
         when (panel) {
             1 -> { renderEmoji(); return }
-            2 -> { renderClipboard(); return }
-            3 -> { renderTextEdit(); return }
-            4 -> { renderSettings(); return }
+            2 -> { root.addView(toolbarRow()); renderClipboard(); return }
+            3 -> { root.addView(toolbarRow()); renderTextEdit(); return }
+            4 -> { root.addView(toolbarRow()); renderSettings(); return }
+            5 -> { root.addView(toolbarRow()); renderMore(); return }
         }
         root.addView(toolbarRow())
         when {
@@ -507,10 +569,25 @@ class KeyboardService : InputMethodService() {
 
     private fun toolbarRow(): LinearLayout {
         val line = newLine()
+        line.addView(iconKey(0, 1f) {
+            if (panel != 0) {
+                panel = 0
+                render()
+            } else {
+                toolsOpen = !toolsOpen
+                refreshSuggestions()
+            }
+        })
+        line.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(22)).apply {
+                setMargins(dp(1), 0, dp(1), 0)
+            }
+            setBackgroundColor(0x55888888)
+        })
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f)
+            layoutParams = LinearLayout.LayoutParams(0, dp(40), 7f)
         }
         sugBox = box
         line.addView(box)
@@ -518,12 +595,40 @@ class KeyboardService : InputMethodService() {
         return line
     }
 
-    private fun titleView(t: String, w: Float) = TextView(this).apply {
-        text = t
-        textSize = 16f
-        gravity = Gravity.CENTER
-        setTextColor(textCol())
-        layoutParams = LinearLayout.LayoutParams(0, dp(40), w)
+    private fun panelHeader(
+        title: String,
+        rightLabel: String? = null,
+        onRight: () -> Unit = {}
+    ): LinearLayout {
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(MP, dp(44))
+            setPadding(dp(8), 0, dp(8), 0)
+        }
+        head.addView(TextView(this).apply {
+            text = title
+            textSize = 17f
+            setTextColor(textCol())
+        })
+        val chev = IconView(5)
+        chev.layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+        chev.setOnClickListener {
+            panel = 0
+            render()
+        }
+        head.addView(chev)
+        head.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
+        if (rightLabel != null) {
+            head.addView(TextView(this).apply {
+                text = rightLabel
+                textSize = 16f
+                setTextColor(0xFF2F7CF6.toInt())
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                setOnClickListener { onRight() }
+            })
+        }
+        return head
     }
 
     private fun hint(t: String) = TextView(this).apply {
@@ -553,7 +658,7 @@ class KeyboardService : InputMethodService() {
         val items = if (emojiCat == 0) loadRecent() else emojiList(emojiCat)
         val scroll = scrollBox()
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        if (items.isEmpty()) col.addView(hint("এখনো কোনো emoji ব্যবহার করা হয়নি"))
+        if (items.isEmpty()) col.addView(hint("No recent emojis"))
         for (chunk in items.chunked(8)) {
             val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             for (e in chunk) line.addView(emojiCell(e))
@@ -603,59 +708,106 @@ class KeyboardService : InputMethodService() {
     // ---------- Clipboard ----------
     private fun renderClipboard() {
         recordClip()
-        val head = newLine()
-        head.addView(key("ABC", 1.5f, fn = true, hDp = 40) {
-            panel = 0
-            render()
-        })
-        head.addView(titleView("ক্লিপবোর্ড", 5f))
-        head.addView(key("🗑 সব মুছুন", 3.5f, fn = true, hDp = 40, sp = 13f) {
-            clips.clear()
+        root.addView(panelHeader("Clipboard", "Delete all") {
+            clips.removeAll { !it.locked }
             saveClips()
             render()
         })
-        root.addView(head)
 
-        val scroll = scrollBox()
+        val frame = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(MP, dp(200))
+        }
+        val scroll = ScrollView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(MP, MP)
+            isVerticalScrollBarEnabled = false
+        }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        if (clips.isEmpty()) col.addView(hint("কিছু copy করলে এখানে জমা হবে"))
-        for (t in clips.toList()) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                background = bg(keyBg())
-                layoutParams = LinearLayout.LayoutParams(MP, WC).apply {
-                    setMargins(dp(2), dp(3), dp(2), dp(3))
-                }
+        val shown = clips.sortedByDescending { it.locked }
+        if (shown.isEmpty()) col.addView(hint("Copy something and it will appear here"))
+        for (chunk in shown.chunked(3)) {
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (c in chunk) line.addView(clipCard(c))
+            repeat(3 - chunk.size) {
+                line.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, dp(10), 1f)
+                })
             }
-            row.addView(TextView(this).apply {
-                text = t
-                maxLines = 2
-                ellipsize = TextUtils.TruncateAt.END
-                textSize = 15f
-                setTextColor(textCol())
-                setPadding(dp(12), dp(10), dp(8), dp(10))
-                layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
-                setOnClickListener {
-                    currentInputConnection?.commitText(t, 1)
-                }
-            })
-            row.addView(TextView(this).apply {
-                text = "✕"
-                textSize = 16f
-                gravity = Gravity.CENTER
-                setTextColor(textCol())
-                setPadding(dp(14), dp(10), dp(14), dp(10))
-                setOnClickListener {
-                    clips.remove(t)
-                    saveClips()
-                    render()
-                }
-            })
-            col.addView(row)
+            col.addView(line)
         }
         scroll.addView(col)
-        root.addView(scroll)
+        frame.addView(scroll)
+        val m = menuClip
+        if (m != null) frame.addView(clipMenuView(m))
+        root.addView(frame)
+    }
+
+    private fun clipCard(c: Clip) = TextView(this).apply {
+        text = c.text
+        textSize = 13f
+        maxLines = 5
+        ellipsize = TextUtils.TruncateAt.END
+        setTextColor(textCol())
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        gravity = Gravity.TOP or Gravity.START
+        background = GradientDrawable().apply {
+            cornerRadius = dp(8).toFloat()
+            setColor(keyBg())
+            if (c.locked) setStroke(dp(2), 0xFF2F7CF6.toInt())
+        }
+        layoutParams = LinearLayout.LayoutParams(0, dp(96), 1f).apply {
+            setMargins(dp(3), dp(3), dp(3), dp(3))
+        }
+        setOnClickListener {
+            if (haptic) it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            currentInputConnection?.commitText(c.text, 1)
+        }
+        setOnLongClickListener {
+            menuClip = c
+            render()
+            true
+        }
+    }
+
+    private fun clipMenuView(c: Clip): View {
+        val dim = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(MP, MP)
+            setBackgroundColor(0x55000000)
+            setOnClickListener {
+                menuClip = null
+                render()
+            }
+        }
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                setColor(keyBg())
+            }
+            layoutParams = FrameLayout.LayoutParams(dp(260), WC, Gravity.CENTER)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        card.addView(menuItem("Delete from clipboard") {
+            clips.remove(c)
+            menuClip = null
+            saveClips()
+            render()
+        })
+        card.addView(menuItem(if (c.locked) "Unlock from clipboard" else "Lock to clipboard") {
+            c.locked = !c.locked
+            menuClip = null
+            saveClips()
+            render()
+        })
+        dim.addView(card)
+        return dim
+    }
+
+    private fun menuItem(label: String, onTap: () -> Unit) = TextView(this).apply {
+        text = label
+        textSize = 16f
+        setTextColor(textCol())
+        setPadding(dp(18), dp(16), dp(18), dp(16))
+        setOnClickListener { onTap() }
     }
 
     // ---------- Text editing ----------
@@ -674,7 +826,7 @@ class KeyboardService : InputMethodService() {
     private fun renderTextEdit() {
         val top = newLine()
         top.addView(key("⇤", 1f, fn = true) { sendArrow(KeyEvent.KEYCODE_MOVE_HOME) })
-        top.addView(key("সব নির্বাচন", 4f, fn = true, sp = 15f) { menuAction(android.R.id.selectAll) })
+        top.addView(key("Select all", 4f, fn = true, sp = 15f) { menuAction(android.R.id.selectAll) })
         top.addView(key("⇥", 1f, fn = true) { sendArrow(KeyEvent.KEYCODE_MOVE_END) })
         top.addView(key("✕", 1.5f, flat = true) {
             panel = 0
@@ -699,7 +851,7 @@ class KeyboardService : InputMethodService() {
 
         val mid = newLine()
         mid.addView(key("←", 1f, fn = true, repeat = true) { sendArrow(KeyEvent.KEYCODE_DPAD_LEFT) })
-        mid.addView(key("নির্বাচন", 2f, fn = !selecting, accent = selecting, sp = 14f) {
+        mid.addView(key("Select", 2f, fn = !selecting, accent = selecting, sp = 14f) {
             selecting = !selecting
             render()
         })
@@ -734,15 +886,55 @@ class KeyboardService : InputMethodService() {
         root.addView(body)
     }
 
-    // ---------- Settings ----------
-    private fun renderSettings() {
-        val head = newLine()
-        head.addView(key("ABC", 1.5f, fn = true, hDp = 40) {
-            panel = 0
+    // ---------- More ----------
+    private fun renderMore() {
+        root.addView(panelHeader("More"))
+        val themeNames = listOf("Auto", "Light", "Dark")
+        val heightNames = listOf("Small", "Medium", "Large")
+        val handNames = listOf("Off", "Left", "Right")
+
+        fun tile(label: String, onTap: () -> Unit): Button =
+            key(label, 1f, fn = true, hDp = 64, sp = 14f, onTap = onTap)
+
+        val r1 = newLine()
+        r1.addView(tile("Settings") {
+            panel = 4
             render()
         })
-        head.addView(titleView("Settings", 8.5f))
-        root.addView(head)
+        r1.addView(tile("One-handed\n" + handNames[oneHand]) {
+            oneHand = (oneHand + 1) % 3
+            putPref("onehand", oneHand)
+            render()
+        })
+        r1.addView(tile("Theme\n" + themeNames[themeMode]) {
+            themeMode = (themeMode + 1) % 3
+            putPref("theme", themeMode)
+            render()
+        })
+        root.addView(r1)
+
+        val r2 = newLine()
+        r2.addView(tile("Key height\n" + heightNames[heightSet]) {
+            heightSet = (heightSet + 1) % 3
+            putPref("height", heightSet)
+            render()
+        })
+        r2.addView(tile("Vibration\n" + (if (haptic) "On" else "Off")) {
+            haptic = !haptic
+            putPref("haptic", if (haptic) 1 else 0)
+            render()
+        })
+        r2.addView(tile("Key sound\n" + (if (sound) "On" else "Off")) {
+            sound = !sound
+            putPref("sound", if (sound) 1 else 0)
+            render()
+        })
+        root.addView(r2)
+    }
+
+    // ---------- Settings ----------
+    private fun renderSettings() {
+        root.addView(panelHeader("Settings"))
 
         val scroll = scrollBox()
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -761,51 +953,51 @@ class KeyboardService : InputMethodService() {
             col.addView(line)
         }
 
-        row("থিম", listOf("স্বয়ংক্রিয়", "হালকা", "গাঢ়"), themeMode) {
+        row("Theme", listOf("Auto", "Light", "Dark"), themeMode) {
             themeMode = it
             putPref("theme", it)
             render()
         }
-        row("Key এর উচ্চতা", listOf("ছোট", "মাঝারি", "বড়"), heightSet) {
+        row("Key height", listOf("Small", "Medium", "Large"), heightSet) {
             heightSet = it
             putPref("height", it)
             render()
         }
-        row("কম্পন", listOf("চালু", "বন্ধ"), if (haptic) 0 else 1) {
+        row("Vibration", listOf("On", "Off"), if (haptic) 0 else 1) {
             haptic = it == 0
             putPref("haptic", if (haptic) 1 else 0)
             render()
         }
-        row("Key এর শব্দ", listOf("চালু", "বন্ধ"), if (sound) 0 else 1) {
+        row("Key sound", listOf("On", "Off"), if (sound) 0 else 1) {
             sound = it == 0
             putPref("sound", if (sound) 1 else 0)
             render()
         }
-        row("শব্দ প্রস্তাব", listOf("চালু", "বন্ধ"), if (suggestOn) 0 else 1) {
+        row("Word suggestions", listOf("On", "Off"), if (suggestOn) 0 else 1) {
             suggestOn = it == 0
             putPref("suggest", if (suggestOn) 1 else 0)
             render()
         }
-        row("এক হাতে ব্যবহার", listOf("বন্ধ", "বামে", "ডানে"), oneHand) {
+        row("One-handed mode", listOf("Off", "Left", "Right"), oneHand) {
             oneHand = it
             putPref("onehand", it)
             render()
         }
 
         col.addView(TextView(this).apply {
-            text = "তথ্য মুছুন"
+            text = "Clear data"
             textSize = 13f
             setTextColor(textCol())
             setPadding(dp(6), dp(8), 0, 0)
         })
         val reset = newLine()
-        reset.addView(key("শেখা শব্দ মুছুন", 1f, fn = true, hDp = 38, sp = 13f) {
+        reset.addView(key("Clear learned words", 1f, fn = true, hDp = 38, sp = 13f) {
             learned.clear()
             learnedLoaded = true
             getSharedPreferences("kb", MODE_PRIVATE).edit().remove("words").apply()
             render()
         })
-        reset.addView(key("ক্লিপবোর্ড মুছুন", 1f, fn = true, hDp = 38, sp = 13f) {
+        reset.addView(key("Clear clipboard", 1f, fn = true, hDp = 38, sp = 13f) {
             clips.clear()
             saveClips()
             render()
@@ -816,7 +1008,7 @@ class KeyboardService : InputMethodService() {
         root.addView(scroll)
     }
 
-    // ---------- অক্ষরের keyboard ----------
+    // ---------- Letter keyboards ----------
     private fun renderEnglish() {
         for ((i, r) in enRows.withIndex()) {
             val line = newLine()
@@ -937,7 +1129,7 @@ class KeyboardService : InputMethodService() {
         }
     }
 
-    // ================= টাইপ করা =================
+    // ================= Typing =================
     private fun isBoundary(s: String) =
         s.isNotEmpty() && !(s[0].isLetter() || s[0] in '\u0980'..'\u09FF')
 
@@ -945,6 +1137,7 @@ class KeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         if (isBoundary(s)) learnCurrent()
         ic.commitText(s, 1)
+        toolsOpen = false
         if (shift && !caps) {
             shift = false
             render()
