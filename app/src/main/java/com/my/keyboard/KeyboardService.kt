@@ -2,7 +2,10 @@ package com.my.keyboard
 
 import android.content.ClipboardManager
 import android.content.res.Configuration
+import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.inputmethodservice.InputMethodService
@@ -28,7 +31,7 @@ class KeyboardService : InputMethodService() {
     private val MP = LinearLayout.LayoutParams.MATCH_PARENT
     private val WC = LinearLayout.LayoutParams.WRAP_CONTENT
 
-    private var lang = 0 // 0 = English, 1 = বাংলা (Samsung), 2 = Avro
+    private var lang = 0 // 0 = English, 1 = বাংলা (Samsung)
     private var shift = false
     private var caps = false
     private var lastShiftTap = 0L
@@ -50,7 +53,6 @@ class KeyboardService : InputMethodService() {
     private var sugBox: LinearLayout? = null
     private val uiHandler = Handler(Looper.getMainLooper())
     private val emojiCache = HashMap<Int, List<String>>()
-    private val avro = StringBuilder()
     private val learned = HashMap<String, Int>()
     private var learnedLoaded = false
     private val clips = ArrayList<String>()
@@ -85,102 +87,94 @@ class KeyboardService : InputMethodService() {
         listOf("১ ২ ৩ ৪ ৫ ৬ ৭ ৮ ৯ ০", "৲ ৳ \\ | < > { } [ ]", "ঽ ৺ ° । ॥ ‘ ’ “ ” …", "ZWNJ|\u200C ZWJ|\u200D ¤ ॐ + ~ `")
     )
 
-    // ================= Avro =================
-    private class Tok(val p: String, val a: String, val b: String, val t: Int)
+    // ================= আইকন (হাতে আঁকা) =================
+    private inner class IconView(val kind: Int) : View(this@KeyboardService) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val q = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    private val avroToks: List<Tok> = run {
-        val l = ArrayList<Tok>()
-        fun c(p: String, a: String) { l.add(Tok(p, a, "", 0)) }
-        fun v(p: String, a: String, b: String) { l.add(Tok(p, a, b, 1)) }
-        c("ngkh", "ঙ্খ"); c("nggh", "ঙ্ঘ"); c("ngk", "ঙ্ক"); c("ngg", "ঙ্গ")
-        c("ksh", "ক্ষ"); c("kSh", "ক্ষ"); c("gg", "জ্ঞ")
-        c("chh", "ছ"); c("ch", "চ"); c("kh", "খ"); c("gh", "ঘ"); c("jh", "ঝ")
-        c("Th", "ঠ"); c("Dh", "ঢ"); c("th", "থ"); c("dh", "ধ"); c("ph", "ফ"); c("bh", "ভ")
-        c("sh", "শ"); c("Sh", "ষ"); c("Rh", "ঢ়"); c("Ng", "ঙ")
-        c("k", "ক"); c("g", "গ"); c("c", "চ"); c("j", "জ"); c("T", "ট"); c("D", "ড")
-        c("N", "ণ"); c("t", "ত"); c("d", "দ"); c("n", "ন"); c("p", "প"); c("f", "ফ")
-        c("b", "ব"); c("v", "ভ"); c("m", "ম"); c("z", "য"); c("r", "র"); c("l", "ল")
-        c("S", "শ"); c("s", "স"); c("h", "হ"); c("R", "ড়"); c("q", "ক"); c("x", "ক্স")
-        l.add(Tok("ng", "ং", "", 2))
-        l.add(Tok("y", "", "", 3))
-        l.add(Tok("w", "", "", 4))
-        v("rri", "ঋ", "ৃ"); v("oi", "ঐ", "ৈ"); v("ou", "ঔ", "ৌ"); v("OI", "ঐ", "ৈ"); v("OU", "ঔ", "ৌ")
-        v("ii", "ঈ", "ী"); v("ee", "ঈ", "ী"); v("uu", "ঊ", "ূ"); v("oo", "উ", "ু"); v("aa", "আ", "া")
-        v("a", "আ", "া"); v("i", "ই", "ি"); v("I", "ঈ", "ী"); v("u", "উ", "ু"); v("U", "ঊ", "ূ")
-        v("e", "এ", "ে"); v("O", "ও", "ো"); v("o", "অ", "")
-        l.sortedByDescending { it.p.length }
-    }
-
-    private val avroAuto = mapOf(
-        "bhalo" to "ভালো", "bhalobashi" to "ভালোবাসি", "tomake" to "তোমাকে",
-        "tomar" to "তোমার", "tomra" to "তোমরা", "tomader" to "তোমাদের",
-        "kothay" to "কোথায়", "dhonnobad" to "ধন্যবাদ", "dhonnobaad" to "ধন্যবাদ",
-        "achi" to "আছি", "acho" to "আছো", "achen" to "আছেন", "ache" to "আছে",
-        "korchi" to "করছি", "korcho" to "করছো", "korchen" to "করছেন", "bolo" to "বলো"
-    )
-
-    private fun avroConvert(src: String): String {
-        avroAuto[src]?.let { return it }
-        val out = StringBuilder()
-        var s = src
-        var afterCons = false
-        var i = 0
-        while (i < s.length) {
-            var tok: Tok? = null
-            for (k in avroToks) {
-                if (s.startsWith(k.p, i)) {
-                    tok = k
-                    break
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val u = minOf(width, height) / 40f
+            val cx = width / 2f
+            val cy = height / 2f
+            p.reset()
+            p.isAntiAlias = true
+            p.style = Paint.Style.FILL
+            p.color = if (dark) 0xFFB8B8B8.toInt() else 0xFF6B6B6B.toInt()
+            q.reset()
+            q.isAntiAlias = true
+            q.color = bgColor()
+            when (kind) {
+                1 -> { // স্মাইলি
+                    canvas.drawCircle(cx, cy, 11f * u, p)
+                    q.style = Paint.Style.FILL
+                    canvas.drawCircle(cx - 4f * u, cy - 3f * u, 1.7f * u, q)
+                    canvas.drawCircle(cx + 4f * u, cy - 3f * u, 1.7f * u, q)
+                    q.style = Paint.Style.STROKE
+                    q.strokeWidth = 1.8f * u
+                    q.strokeCap = Paint.Cap.ROUND
+                    canvas.drawArc(
+                        RectF(cx - 5.5f * u, cy - 5f * u, cx + 5.5f * u, cy + 6f * u),
+                        20f, 140f, false, q
+                    )
+                }
+                2 -> { // clipboard
+                    canvas.drawRoundRect(
+                        RectF(cx - 8f * u, cy - 9f * u, cx + 8f * u, cy + 11f * u),
+                        2f * u, 2f * u, p
+                    )
+                    canvas.drawRoundRect(
+                        RectF(cx - 4.5f * u, cy - 12f * u, cx + 4.5f * u, cy - 6f * u),
+                        1.5f * u, 1.5f * u, p
+                    )
+                    q.style = Paint.Style.STROKE
+                    q.strokeWidth = 1.6f * u
+                    q.strokeCap = Paint.Cap.ROUND
+                    canvas.drawLine(cx - 4.5f * u, cy - 1f * u, cx + 4.5f * u, cy - 1f * u, q)
+                    canvas.drawLine(cx - 4.5f * u, cy + 3f * u, cx + 4.5f * u, cy + 3f * u, q)
+                    canvas.drawLine(cx - 4.5f * u, cy + 7f * u, cx + 1.5f * u, cy + 7f * u, q)
+                }
+                3 -> { // চার তীর
+                    val path = Path()
+                    path.moveTo(cx, cy - 11f * u)
+                    path.lineTo(cx - 4f * u, cy - 6f * u)
+                    path.lineTo(cx + 4f * u, cy - 6f * u)
+                    path.close()
+                    path.moveTo(cx, cy + 11f * u)
+                    path.lineTo(cx - 4f * u, cy + 6f * u)
+                    path.lineTo(cx + 4f * u, cy + 6f * u)
+                    path.close()
+                    path.moveTo(cx - 11f * u, cy)
+                    path.lineTo(cx - 6f * u, cy - 4f * u)
+                    path.lineTo(cx - 6f * u, cy + 4f * u)
+                    path.close()
+                    path.moveTo(cx + 11f * u, cy)
+                    path.lineTo(cx + 6f * u, cy - 4f * u)
+                    path.lineTo(cx + 6f * u, cy + 4f * u)
+                    path.close()
+                    canvas.drawPath(path, p)
+                }
+                else -> { // তিন বিন্দু
+                    canvas.drawCircle(cx - 8f * u, cy, 2.2f * u, p)
+                    canvas.drawCircle(cx, cy, 2.2f * u, p)
+                    canvas.drawCircle(cx + 8f * u, cy, 2.2f * u, p)
                 }
             }
-            if (tok == null) {
-                val c = s[i]
-                if (c.isUpperCase() && c.lowercaseChar() != c) {
-                    s = s.substring(0, i) + c.lowercaseChar() + s.substring(i + 1)
-                    continue
-                }
-                out.append(c)
-                afterCons = false
-                i++
-                continue
-            }
-            when (tok.t) {
-                0 -> {
-                    if (afterCons) out.append('্')
-                    out.append(tok.a)
-                    afterCons = true
-                }
-                1 -> {
-                    out.append(if (afterCons) tok.b else tok.a)
-                    afterCons = false
-                }
-                2 -> {
-                    out.append(tok.a)
-                    afterCons = false
-                }
-                3 -> {
-                    out.append(if (afterCons) "্য" else "য়")
-                    afterCons = true
-                }
-                else -> {
-                    if (afterCons) {
-                        out.append("্ব")
-                    } else {
-                        out.append("ও")
-                    }
-                }
-            }
-            i += tok.p.length
         }
-        return out.toString()
     }
 
-    private fun isLatin(s: String) = s.length == 1 && (s[0] in 'a'..'z' || s[0] in 'A'..'Z')
-
-    private fun flushAvro() {
-        if (avro.isEmpty()) return
-        currentInputConnection?.commitText(avroConvert(avro.toString()), 1)
-        avro.setLength(0)
+    private fun iconKey(kind: Int, onTap: () -> Unit): View {
+        val v = IconView(kind)
+        v.background = bg(0)
+        v.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
+        }
+        v.setOnClickListener {
+            if (haptic) it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            if (sound) it.playSoundEffect(SoundEffectConstants.CLICK)
+            onTap()
+        }
+        return v
     }
 
     // ================= Suggestions =================
@@ -228,7 +222,6 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun currentWord(): String {
-        if (avro.isNotEmpty()) return avroConvert(avro.toString())
         val before = currentInputConnection?.getTextBeforeCursor(30, 0) ?: return ""
         var i = before.length
         while (i > 0 && isWordChar(before[i - 1])) i--
@@ -258,10 +251,7 @@ class KeyboardService : InputMethodService() {
         if (isPassword()) return emptyList()
         val w = currentWord()
         if (w.isEmpty()) return emptyList()
-        val limit = if (avro.isNotEmpty()) 2 else 3
-        val res = ArrayList<String>(matches(w).take(limit))
-        if (avro.isNotEmpty()) res.add(avro.toString())
-        return res
+        return matches(w).take(3)
     }
 
     private fun refreshSuggestions() {
@@ -269,23 +259,19 @@ class KeyboardService : InputMethodService() {
         box.removeAllViews()
         val list = if (panel != 0 || !suggestOn) emptyList() else candidates()
         if (list.isEmpty()) {
-            box.addView(key("😊", 1f, flat = true, hDp = 40, sp = 22f) {
-                flushAvro()
+            box.addView(iconKey(1) {
                 panel = 1
                 render()
             })
-            box.addView(key("📋", 1f, flat = true, hDp = 40, sp = 22f) {
-                flushAvro()
+            box.addView(iconKey(2) {
                 panel = 2
                 render()
             })
-            box.addView(key("✂️", 1f, flat = true, hDp = 40, sp = 22f) {
-                flushAvro()
+            box.addView(iconKey(3) {
                 panel = 3
                 render()
             })
-            box.addView(key("⚙️", 1f, flat = true, hDp = 40, sp = 22f) {
-                flushAvro()
+            box.addView(iconKey(4) {
                 panel = 4
                 render()
             })
@@ -312,14 +298,9 @@ class KeyboardService : InputMethodService() {
 
     private fun pick(s: String) {
         val ic = currentInputConnection ?: return
-        if (avro.isNotEmpty()) {
-            avro.setLength(0)
-            ic.commitText(s + " ", 1)
-        } else {
-            val w = currentWord()
-            ic.deleteSurroundingText(w.length, 0)
-            ic.commitText(s + " ", 1)
-        }
+        val w = currentWord()
+        ic.deleteSurroundingText(w.length, 0)
+        ic.commitText(s + " ", 1)
         learn(s)
         refreshSuggestions()
     }
@@ -476,17 +457,11 @@ class KeyboardService : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
-        avro.setLength(0)
         if (::root.isInitialized) {
             panel = 0
             selecting = false
             render()
         }
-    }
-
-    override fun onFinishInputView(finishingInput: Boolean) {
-        flushAvro()
-        super.onFinishInputView(finishingInput)
     }
 
     override fun onUpdateSelection(
@@ -496,10 +471,6 @@ class KeyboardService : InputMethodService() {
         super.onUpdateSelection(
             oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
         )
-        if (avro.isNotEmpty() && (newSelStart != candidatesEnd || newSelEnd != candidatesEnd)) {
-            avro.setLength(0)
-            currentInputConnection?.finishComposingText()
-        }
         if (::root.isInitialized) refreshSuggestions()
     }
 
@@ -610,7 +581,6 @@ class KeyboardService : InputMethodService() {
         layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
         setOnClickListener {
             if (haptic) it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            flushAvro()
             currentInputConnection?.commitText(e, 1)
             addRecent(e)
         }
@@ -667,7 +637,6 @@ class KeyboardService : InputMethodService() {
                 setPadding(dp(12), dp(10), dp(8), dp(10))
                 layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
                 setOnClickListener {
-                    flushAvro()
                     currentInputConnection?.commitText(t, 1)
                 }
             })
@@ -922,20 +891,15 @@ class KeyboardService : InputMethodService() {
             })
         }
         line.addView(key(",") { type(",") })
-        val spaceLabel = when (lang) {
-            1 -> "◂  বাংলা  ▸"
-            2 -> "◂  Avro  ▸"
-            else -> "◂  English (US)  ▸"
-        }
+        val spaceLabel = if (lang == 1) "◂  বাংলা  ▸" else "◂  English (US)  ▸"
         line.addView(key(spaceLabel, 5f, onLong = { toggleLang() }) { type(" ") })
-        line.addView(key(if (lang == 0) "." else "।") { type(if (lang == 1) "।" else ".") })
+        line.addView(key(if (lang == 0) "." else "।") { type(if (lang == 0) "." else "।") })
         line.addView(key("↵", 1.5f, fn = true) { enter() })
         return line
     }
 
     private fun toggleLang() {
-        flushAvro()
-        lang = (lang + 1) % 3
+        lang = if (lang == 0) 1 else 0
         mode = 0
         shift = false
         caps = false
@@ -979,14 +943,8 @@ class KeyboardService : InputMethodService() {
 
     private fun type(s: String) {
         val ic = currentInputConnection ?: return
-        if (lang == 2 && isLatin(s)) {
-            avro.append(s)
-            ic.setComposingText(avroConvert(avro.toString()), 1)
-        } else {
-            if (isBoundary(s)) learnCurrent()
-            flushAvro()
-            ic.commitText(if (lang == 2 && s == ".") "।" else s, 1)
-        }
+        if (isBoundary(s)) learnCurrent()
+        ic.commitText(s, 1)
         if (shift && !caps) {
             shift = false
             render()
@@ -996,24 +954,12 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun backspace() {
-        val ic = currentInputConnection ?: return
-        if (avro.isNotEmpty()) {
-            avro.setLength(avro.length - 1)
-            if (avro.isEmpty()) {
-                ic.setComposingText("", 1)
-                ic.finishComposingText()
-            } else {
-                ic.setComposingText(avroConvert(avro.toString()), 1)
-            }
-        } else {
-            sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
-        }
+        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
         refreshSuggestions()
     }
 
     private fun enter() {
         learnCurrent()
-        flushAvro()
         if (!sendDefaultEditorAction(true)) {
             sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
         }
