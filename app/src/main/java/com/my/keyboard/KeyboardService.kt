@@ -21,6 +21,8 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SoundEffectConstants
 import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.FrameLayout
@@ -43,7 +45,9 @@ class KeyboardService : InputMethodService() {
     private var panel = 0 // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more
     private var emojiCat = 1
     private var selecting = false
-    private var toolsOpen = false
+    private var barMode = 0 // 0 = auto, 1 = tools, 2 = suggestions
+    private var lastShowSug = false
+    private var barFresh = true
 
     private var themeMode = 0
     private var heightSet = 1
@@ -54,9 +58,15 @@ class KeyboardService : InputMethodService() {
     private var clipOn = true
     private var clipExpire = 0 // 0 = never, 1 = 1 day, 2 = 7 days, 3 = 30 days
 
+    private lateinit var host: FrameLayout
+    private lateinit var overlay: FrameLayout
     private lateinit var root: LinearLayout
     private var sugBox: LinearLayout? = null
+    private var leftIcon: IconView? = null
+    private var previewView: TextView? = null
+    private var langPopup: TextView? = null
     private val uiHandler = Handler(Looper.getMainLooper())
+    private val hidePreviewRunnable = Runnable { previewView?.visibility = View.GONE }
     private val emojiCache = HashMap<Int, List<String>>()
     private val learned = HashMap<String, Int>()
     private var learnedLoaded = false
@@ -101,7 +111,7 @@ class KeyboardService : InputMethodService() {
     )
 
     // ================= Icons (drawn by hand) =================
-    private inner class IconView(val kind: Int) : View(this@KeyboardService) {
+    private inner class IconView(var kind: Int) : View(this@KeyboardService) {
         var tint = 0
         var cutColor = 0
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -120,7 +130,7 @@ class KeyboardService : InputMethodService() {
             q.isAntiAlias = true
             q.color = if (cutColor != 0) cutColor else bgColor()
             when (kind) {
-                0 -> { // T with circular arrows
+                0, 20 -> { // circular arrows with T (tools mode) or smiley (suggestion mode)
                     p.style = Paint.Style.STROKE
                     p.strokeWidth = 2f * u
                     val r = 10f * u
@@ -140,10 +150,22 @@ class KeyboardService : InputMethodService() {
                         path.close()
                         canvas.drawPath(path, p)
                     }
-                    p.textAlign = Paint.Align.CENTER
-                    p.textSize = 12f * u
-                    p.isFakeBoldText = true
-                    canvas.drawText("T", cx, cy + 4.2f * u, p)
+                    if (kind == 0) {
+                        p.textAlign = Paint.Align.CENTER
+                        p.textSize = 12f * u
+                        p.isFakeBoldText = true
+                        canvas.drawText("T", cx, cy + 4.2f * u, p)
+                    } else {
+                        canvas.drawCircle(cx - 2.8f * u, cy - 1.6f * u, 1.2f * u, p)
+                        canvas.drawCircle(cx + 2.8f * u, cy - 1.6f * u, 1.2f * u, p)
+                        p.style = Paint.Style.STROKE
+                        p.strokeWidth = 1.5f * u
+                        p.strokeCap = Paint.Cap.ROUND
+                        canvas.drawArc(
+                            RectF(cx - 4.2f * u, cy - 4.2f * u, cx + 4.2f * u, cy + 4.8f * u),
+                            25f, 130f, false, p
+                        )
+                    }
                 }
                 1 -> { // smiley
                     canvas.drawCircle(cx, cy, 11f * u, p)
@@ -337,6 +359,90 @@ class KeyboardService : InputMethodService() {
         return v
     }
 
+    // ================= Popups (key preview and language) =================
+    private fun relPos(v: View): IntArray {
+        val a = IntArray(2)
+        val b = IntArray(2)
+        v.getLocationInWindow(a)
+        host.getLocationInWindow(b)
+        return intArrayOf(a[0] - b[0], a[1] - b[1])
+    }
+
+    private fun popupBg(radius: Int) = GradientDrawable().apply {
+        cornerRadius = dp(radius).toFloat()
+        setColor(keyBg())
+    }
+
+    private fun showPreview(v: View, label: String) {
+        if (!::host.isInitialized) return
+        uiHandler.removeCallbacks(hidePreviewRunnable)
+        var pv = previewView
+        if (pv == null) {
+            pv = TextView(this)
+            pv.gravity = Gravity.CENTER
+            pv.textSize = 26f
+            pv.elevation = dp(6).toFloat()
+            overlay.addView(pv)
+            previewView = pv
+        }
+        val w = v.width + dp(8)
+        val h = v.height + dp(8)
+        val pos = relPos(v)
+        var x = pos[0] + (v.width - w) / 2
+        if (x > host.width - w) x = host.width - w
+        if (x < 0) x = 0
+        var y = pos[1] - h + dp(2)
+        if (y < 0) y = 0
+        pv.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.TOP or Gravity.START)
+        pv.translationX = x.toFloat()
+        pv.translationY = y.toFloat()
+        pv.background = popupBg(10)
+        pv.setTextColor(textCol())
+        pv.text = label
+        pv.scaleX = 0.88f
+        pv.scaleY = 0.88f
+        pv.visibility = View.VISIBLE
+        pv.animate().scaleX(1f).scaleY(1f).setDuration(60).start()
+    }
+
+    private fun hidePreview() {
+        uiHandler.removeCallbacks(hidePreviewRunnable)
+        uiHandler.postDelayed(hidePreviewRunnable, 70)
+    }
+
+    private fun showLangPopup(anchor: View, dir: Int) {
+        if (!::host.isInitialized) return
+        var lp = langPopup
+        if (lp == null) {
+            lp = TextView(this)
+            lp.gravity = Gravity.CENTER
+            lp.textSize = 15f
+            lp.elevation = dp(6).toFloat()
+            overlay.addView(lp)
+            langPopup = lp
+        }
+        val w = dp(160)
+        val h = dp(46)
+        val pos = relPos(anchor)
+        var x = pos[0] + (anchor.width - w) / 2
+        if (x > host.width - w) x = host.width - w
+        if (x < 0) x = 0
+        val y = maxOf(pos[1] - h - dp(2), 0)
+        lp.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.TOP or Gravity.START)
+        lp.translationX = x.toFloat() + dir * dp(30)
+        lp.translationY = y.toFloat()
+        lp.background = popupBg(14)
+        lp.setTextColor(textCol())
+        lp.text = "◂   " + (if (lang == 0) "বাংলা" else "English (US)") + "   ▸"
+        lp.alpha = 0f
+        lp.visibility = View.VISIBLE
+        lp.animate().alpha(1f).translationX(x.toFloat()).setDuration(130).start()
+    }
+
+    private fun hideLangPopup() {
+        langPopup?.visibility = View.GONE
+    }
+
     // ================= Suggestions =================
     private val enWords = "the be to of and a in that have it for not on with he as you do at this but his by from they we say her she or an will my one all would there their what so up out if about who get which go me when make can like time no just him know take people into year your good some could them see other than then now look only come its over think also back after use two how our work first well way even new want because any these give day most us is are was were been has had did does am hello hi thanks thank please sorry okay yes where why tomorrow today tonight morning night friend family home love happy birthday welcome great nice really very much more still should going doing coming working message phone call tell send share meeting office school food water money problem question answer help need understand remember forget something anything everything nothing someone everyone yesterday thinking wonderful important different information beautiful together possible between another without through before always never maybe probably however actually definitely especially awesome congratulations assalamualaikum inshallah alhamdulillah mashallah bangladesh dhaka internet facebook whatsapp youtube google"
     private val bnWords = "আমি তুমি আপনি সে আমরা তোমরা তারা এই ওই কি কী কেন কোথায় কখন কেমন কত কে কাকে না হ্যাঁ ভালো খারাপ আছি আছো আছেন আছে করছি করছো করছেন করে করা করব করবো হবে হয় হয়েছে হচ্ছে যাব যাবো যাচ্ছি আসব আসবো আসছি বলো বলছি বলুন ধন্যবাদ দুঃখিত অনেক একটু এখন তখন আজ কাল আগামীকাল গতকাল সকাল দুপুর বিকাল সন্ধ্যা রাত বন্ধু ভাই বোন মা বাবা বাড়ি স্কুল কলেজ অফিস কাজ টাকা খাবার পানি ভাত চা সালাম শুভ জন্মদিন শুভেচ্ছা স্বাগতম ঠিক থাকো থাকি দেখা তাহলে কিন্তু এবং অথবা যদি তবে তাই কারণ সবাই সব কিছু কোনো একটা একটি দুটি তিনটি আমার তোমার আপনার তার আমাদের তোমাদের তাদের বাংলা বাংলাদেশ ঢাকা ভালোবাসা ভালোবাসি মন মানুষ সময় দিন বছর মাস সপ্তাহ প্রশ্ন উত্তর সমস্যা সাহায্য দরকার চাই পারি পারো পারেন জানি জানো জানেন বুঝি বুঝতে শুনছি দেখছি খাচ্ছি খেয়েছো ঘুমাচ্ছি পড়ছি লিখছি কথা ফোন মেসেজ খবর নতুন পুরনো বড় ছোট"
@@ -414,11 +520,22 @@ class KeyboardService : InputMethodService() {
         return matches(w).take(3)
     }
 
+    private fun starters(): List<String> {
+        if (isPassword() || currentWord().isNotEmpty()) return emptyList()
+        return if (lang == 1) listOf("আমি", "তুমি", "কেমন") else listOf("I", "The", "Hi")
+    }
+
     private fun refreshSuggestions() {
         val box = sugBox ?: return
+        val cands = if (panel != 0 || !suggestOn) emptyList() else candidates()
+        val showSug = panel == 0 && suggestOn && when (barMode) {
+            1 -> false
+            2 -> true
+            else -> cands.isNotEmpty()
+        }
+        val list = if (!showSug) emptyList() else if (cands.isNotEmpty()) cands else starters()
         box.removeAllViews()
-        val list = if (panel != 0 || !suggestOn || toolsOpen) emptyList() else candidates()
-        if (list.isEmpty()) {
+        if (!showSug) {
             box.addView(iconKey(1) {
                 panel = if (panel == 1) 0 else 1
                 render()
@@ -431,29 +548,66 @@ class KeyboardService : InputMethodService() {
                 panel = if (panel == 2) 0 else 2
                 render()
             })
-            box.addView(iconKey(4) {
-                panel = if (panel == 5) 0 else 5
-                render()
-            })
-            return
-        }
-        for ((i, s) in list.withIndex()) {
-            if (i > 0) {
-                box.addView(View(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(1), dp(20))
-                    setBackgroundColor(0x44888888)
+        } else {
+            for ((i, s) in list.withIndex()) {
+                if (i > 0) {
+                    box.addView(View(this).apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(1), dp(20))
+                        setBackgroundColor(0x44888888)
+                    })
+                }
+                box.addView(TextView(this).apply {
+                    text = s
+                    textSize = 16f
+                    maxLines = 1
+                    gravity = Gravity.CENTER
+                    setTextColor(textCol())
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                    setOnClickListener { pick(s) }
                 })
             }
-            box.addView(TextView(this).apply {
-                text = s
-                textSize = 16f
-                maxLines = 1
-                gravity = Gravity.CENTER
-                setTextColor(textCol())
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                setOnClickListener { pick(s) }
-            })
         }
+        val target = if (showSug) 20 else 0
+        val ic = leftIcon
+        if (ic != null && ic.kind != target) {
+            ic.kind = target
+            ic.invalidate()
+        }
+        if (barFresh) {
+            barFresh = false
+            lastShowSug = showSug
+        } else if (showSug != lastShowSug) {
+            lastShowSug = showSug
+            box.animate().cancel()
+            box.alpha = 0f
+            box.animate().alpha(1f).setDuration(180).start()
+        }
+    }
+
+    private fun onBarToggle() {
+        if (panel != 0) {
+            panel = 0
+            render()
+            return
+        }
+        val icon = leftIcon ?: return
+        val box = sugBox ?: return
+        val showingSug = lastShowSug
+        icon.animate().cancel()
+        icon.rotation = 0f
+        icon.animate().rotation(360f).scaleX(1.2f).scaleY(1.2f).setDuration(260)
+            .setInterpolator(AccelerateDecelerateInterpolator())
+            .withEndAction {
+                icon.rotation = 0f
+                icon.animate().scaleX(1f).scaleY(1f).setDuration(100).start()
+            }
+            .start()
+        box.animate().cancel()
+        box.animate().alpha(0f).setDuration(130).withEndAction {
+            barMode = if (showingSug) 1 else 2
+            refreshSuggestions()
+            box.animate().alpha(1f).setDuration(180).start()
+        }.start()
     }
 
     private fun pick(s: String) {
@@ -624,7 +778,7 @@ class KeyboardService : InputMethodService() {
     private fun barColor() = if (dark) 0xFF262626.toInt() else 0xFFD0D0D0.toInt()
     private fun keyBg() = if (dark) 0xFF3C3C3C.toInt() else 0xFFFFFFFF.toInt()
     private fun fnBg() = if (dark) 0xFF2A2A2A.toInt() else 0xFFEBEBEB.toInt()
-    private fun pressBg() = if (dark) 0xFF5A5A5A.toInt() else 0xFFC4C4C4.toInt()
+    private fun pressBg() = if (dark) 0xFF5A5A5A.toInt() else 0xFFB5B5B5.toInt()
     private fun textCol() = if (dark) 0xFFF2F2F2.toInt() else 0xFF1A1A1A.toInt()
 
     private fun keyH() = when (heightSet) {
@@ -678,8 +832,12 @@ class KeyboardService : InputMethodService() {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
+        overlay = FrameLayout(this)
+        host = FrameLayout(this)
+        host.addView(root, FrameLayout.LayoutParams(MP, WC))
+        host.addView(overlay, FrameLayout.LayoutParams(MP, MP))
         render()
-        return root
+        return host
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -687,8 +845,18 @@ class KeyboardService : InputMethodService() {
         if (::root.isInitialized) {
             panel = 0
             selecting = false
-            toolsOpen = false
+            barMode = 0
             render()
+            host.animate().cancel()
+            if (restarting) {
+                host.alpha = 1f
+                host.translationY = 0f
+            } else {
+                host.alpha = 0f
+                host.translationY = dp(26).toFloat()
+                host.animate().alpha(1f).translationY(0f).setDuration(190)
+                    .setInterpolator(DecelerateInterpolator()).start()
+            }
         }
     }
 
@@ -710,6 +878,8 @@ class KeyboardService : InputMethodService() {
             else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
                 Configuration.UI_MODE_NIGHT_YES
         }
+        previewView?.visibility = View.GONE
+        langPopup?.visibility = View.GONE
         val side = if (oneHand == 0) 0 else (resources.displayMetrics.widthPixels * 0.22f).toInt()
         root.setPadding(
             dp(4) + (if (oneHand == 2) side else 0), dp(6),
@@ -718,6 +888,7 @@ class KeyboardService : InputMethodService() {
         root.setBackgroundColor(bgColor())
         root.removeAllViews()
         sugBox = null
+        leftIcon = null
         if (panel != 2) {
             menuClip = null
             confirmAll = false
@@ -743,15 +914,17 @@ class KeyboardService : InputMethodService() {
 
     private fun toolbarRow(): LinearLayout {
         val line = newLine()
-        line.addView(iconKey(0, 1f) {
-            if (panel != 0) {
-                panel = 0
-                render()
-            } else {
-                toolsOpen = !toolsOpen
-                refreshSuggestions()
-            }
-        })
+        val left = IconView(0)
+        left.background = bg(0)
+        left.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
+        }
+        left.setOnClickListener {
+            feedback(it)
+            onBarToggle()
+        }
+        leftIcon = left
+        line.addView(left)
         line.addView(View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(1), dp(22)).apply {
                 setMargins(dp(1), 0, dp(1), 0)
@@ -765,6 +938,11 @@ class KeyboardService : InputMethodService() {
         }
         sugBox = box
         line.addView(box)
+        line.addView(iconKey(4, 1f) {
+            panel = if (panel == 5) 0 else 5
+            render()
+        })
+        barFresh = true
         refreshSuggestions()
         return line
     }
@@ -1354,7 +1532,7 @@ class KeyboardService : InputMethodService() {
             if (i == 3) line.addView(shiftKey())
             for (k in r.split(" ")) {
                 val t = if (shift && i > 0) k.uppercase() else k
-                line.addView(key(t) { type(t) })
+                line.addView(key(t, preview = true) { type(t) })
             }
             if (i == 2) line.addView(spacer(0.5f))
             if (i == 3) line.addView(backKey(1.5f))
@@ -1420,10 +1598,10 @@ class KeyboardService : InputMethodService() {
                 render()
             })
         }
-        line.addView(key(",") { type(",") })
+        line.addView(key(",", preview = true) { type(",") })
         val spaceLabel = if (lang == 1) "◂  বাংলা  ▸" else "◂  English (US)  ▸"
         line.addView(key(spaceLabel, 5f, onSwipe = { toggleLang() }) { type(" ") })
-        line.addView(key(if (lang == 0) "." else "।") { type(if (lang == 0) "." else "।") })
+        line.addView(key(if (lang == 0) "." else "।", preview = true) { type(if (lang == 0) "." else "।") })
         line.addView(key("↵", 1.5f, fn = true) { enter() })
         return line
     }
@@ -1433,6 +1611,7 @@ class KeyboardService : InputMethodService() {
         mode = 0
         shift = false
         caps = false
+        barMode = 0
         render()
     }
 
@@ -1463,7 +1642,7 @@ class KeyboardService : InputMethodService() {
             val commit = if (i > 0) tok.substring(i + 1) else tok
             var label = if (i > 0) tok.substring(0, i) else tok
             if (marks && i <= 0 && label[0] in "ািীুূৃেৈোৌ্ংঃঁ") label = "◌" + label
-            line.addView(key(label) { type(commit) })
+            line.addView(key(label, preview = true) { type(commit) })
         }
     }
 
@@ -1475,7 +1654,7 @@ class KeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         if (isBoundary(s)) learnCurrent()
         ic.commitText(s, 1)
-        toolsOpen = false
+        barMode = 0
         if (shift && !caps) {
             shift = false
             render()
@@ -1525,6 +1704,7 @@ class KeyboardService : InputMethodService() {
         accent: Boolean = false,
         repeat: Boolean = false,
         flat: Boolean = false,
+        preview: Boolean = false,
         hDp: Int = 0,
         sp: Float = 0f,
         onSwipe: ((Int) -> Unit)? = null,
@@ -1574,6 +1754,7 @@ class KeyboardService : InputMethodService() {
         } else if (onSwipe != null) {
             var downX = 0f
             var swiped = false
+            var dir = 1
             setOnTouchListener { v, e ->
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
@@ -1582,22 +1763,30 @@ class KeyboardService : InputMethodService() {
                         v.isPressed = true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        if (!swiped && Math.abs(e.x - downX) > dp(40)) {
+                        val far = Math.abs(e.x - downX) > dp(40)
+                        if (far && !swiped) {
                             swiped = true
-                            v.isPressed = false
-                            feedback(v)
-                            onSwipe(if (e.x > downX) 1 else -1)
+                            dir = if (e.x > downX) 1 else -1
+                            showLangPopup(v, dir)
+                        } else if (!far && swiped) {
+                            swiped = false
+                            hideLangPopup()
                         }
                     }
                     MotionEvent.ACTION_UP -> {
                         v.isPressed = false
-                        if (!swiped) {
+                        if (swiped) {
+                            hideLangPopup()
+                            feedback(v)
+                            onSwipe(dir)
+                        } else {
                             feedback(v)
                             onTap()
                         }
                     }
                     MotionEvent.ACTION_CANCEL -> {
                         v.isPressed = false
+                        hideLangPopup()
                     }
                 }
                 true
@@ -1606,6 +1795,15 @@ class KeyboardService : InputMethodService() {
             setOnClickListener {
                 feedback(it)
                 onTap()
+            }
+            if (preview) {
+                setOnTouchListener { v, e ->
+                    when (e.action) {
+                        MotionEvent.ACTION_DOWN -> showPreview(v, label)
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> hidePreview()
+                    }
+                    false
+                }
             }
         }
     }
