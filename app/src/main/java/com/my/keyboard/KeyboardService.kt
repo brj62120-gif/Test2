@@ -24,6 +24,7 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -50,6 +51,8 @@ class KeyboardService : InputMethodService() {
     private var sound = false
     private var suggestOn = true
     private var oneHand = 0
+    private var clipOn = true
+    private var clipExpire = 0 // 0 = never, 1 = 1 day, 2 = 7 days, 3 = 30 days
 
     private lateinit var root: LinearLayout
     private var sugBox: LinearLayout? = null
@@ -58,10 +61,14 @@ class KeyboardService : InputMethodService() {
     private val learned = HashMap<String, Int>()
     private var learnedLoaded = false
 
-    private class Clip(var text: String, var locked: Boolean)
+    private class Clip(var text: String, var locked: Boolean, val time: Long)
 
     private val clips = ArrayList<Clip>()
     private var menuClip: Clip? = null
+    private var clipFilter = 0 // 0 = All, 1 = Locked, 2 = Links, 3 = Numbers
+    private var selMode = false
+    private val selected = HashSet<Clip>()
+    private var confirmAll = false
 
     private val enRows = listOf(
         "1 2 3 4 5 6 7 8 9 0",
@@ -95,6 +102,8 @@ class KeyboardService : InputMethodService() {
 
     // ================= Icons (drawn by hand) =================
     private inner class IconView(val kind: Int) : View(this@KeyboardService) {
+        var tint = 0
+        var cutColor = 0
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         private val q = Paint(Paint.ANTI_ALIAS_FLAG)
 
@@ -106,10 +115,10 @@ class KeyboardService : InputMethodService() {
             p.reset()
             p.isAntiAlias = true
             p.style = Paint.Style.FILL
-            p.color = if (dark) 0xFFB8B8B8.toInt() else 0xFF6B6B6B.toInt()
+            p.color = if (tint != 0) tint else if (dark) 0xFFB8B8B8.toInt() else 0xFF6B6B6B.toInt()
             q.reset()
             q.isAntiAlias = true
-            q.color = bgColor()
+            q.color = if (cutColor != 0) cutColor else bgColor()
             when (kind) {
                 0 -> { // T with circular arrows
                     p.style = Paint.Style.STROKE
@@ -190,6 +199,111 @@ class KeyboardService : InputMethodService() {
                     canvas.drawCircle(cx, cy, 2.2f * u, p)
                     canvas.drawCircle(cx + 8f * u, cy, 2.2f * u, p)
                 }
+                10 -> { // clock
+                    canvas.drawCircle(cx, cy, 11f * u, p)
+                    q.style = Paint.Style.STROKE
+                    q.strokeWidth = 2f * u
+                    q.strokeCap = Paint.Cap.ROUND
+                    canvas.drawLine(cx, cy, cx, cy - 6f * u, q)
+                    canvas.drawLine(cx, cy, cx + 4.5f * u, cy + 2.5f * u, q)
+                }
+                11 -> { // person
+                    canvas.drawCircle(cx, cy - 5f * u, 4.2f * u, p)
+                    canvas.drawArc(
+                        RectF(cx - 8.5f * u, cy + 1f * u, cx + 8.5f * u, cy + 17f * u),
+                        180f, 180f, true, p
+                    )
+                }
+                12 -> { // paw
+                    canvas.drawOval(RectF(cx - 5.5f * u, cy + 0.5f * u, cx + 5.5f * u, cy + 10f * u), p)
+                    canvas.drawCircle(cx - 7.5f * u, cy - 1.5f * u, 2.4f * u, p)
+                    canvas.drawCircle(cx - 2.8f * u, cy - 6.5f * u, 2.6f * u, p)
+                    canvas.drawCircle(cx + 2.8f * u, cy - 6.5f * u, 2.6f * u, p)
+                    canvas.drawCircle(cx + 7.5f * u, cy - 1.5f * u, 2.4f * u, p)
+                }
+                13 -> { // burger
+                    canvas.drawArc(
+                        RectF(cx - 10f * u, cy - 11f * u, cx + 10f * u, cy + 1f * u),
+                        180f, 180f, true, p
+                    )
+                    canvas.drawRoundRect(
+                        RectF(cx - 10.5f * u, cy - 3.5f * u, cx + 10.5f * u, cy - 0.5f * u),
+                        1.5f * u, 1.5f * u, p
+                    )
+                    canvas.drawRoundRect(
+                        RectF(cx - 10f * u, cy + 1.5f * u, cx + 10f * u, cy + 7f * u),
+                        2.5f * u, 2.5f * u, p
+                    )
+                }
+                14 -> { // ball
+                    canvas.drawCircle(cx, cy, 11f * u, p)
+                    q.style = Paint.Style.STROKE
+                    q.strokeWidth = 1.4f * u
+                    canvas.drawLine(cx, cy - 11f * u, cx, cy + 11f * u, q)
+                    canvas.drawLine(cx - 11f * u, cy, cx + 11f * u, cy, q)
+                    canvas.drawArc(
+                        RectF(cx - 15f * u, cy - 8f * u, cx - 1f * u, cy + 8f * u),
+                        -60f, 120f, false, q
+                    )
+                    canvas.drawArc(
+                        RectF(cx + 1f * u, cy - 8f * u, cx + 15f * u, cy + 8f * u),
+                        120f, 120f, false, q
+                    )
+                }
+                15 -> { // house
+                    val path = Path()
+                    path.moveTo(cx, cy - 11f * u)
+                    path.lineTo(cx + 11f * u, cy - 1f * u)
+                    path.lineTo(cx + 8f * u, cy - 1f * u)
+                    path.lineTo(cx + 8f * u, cy + 10f * u)
+                    path.lineTo(cx - 8f * u, cy + 10f * u)
+                    path.lineTo(cx - 8f * u, cy - 1f * u)
+                    path.lineTo(cx - 11f * u, cy - 1f * u)
+                    path.close()
+                    canvas.drawPath(path, p)
+                    q.style = Paint.Style.FILL
+                    canvas.drawRect(RectF(cx - 2.5f * u, cy + 3f * u, cx + 2.5f * u, cy + 10f * u), q)
+                }
+                16 -> { // light bulb
+                    canvas.drawCircle(cx, cy - 3f * u, 7.5f * u, p)
+                    canvas.drawRoundRect(
+                        RectF(cx - 3.5f * u, cy + 5.5f * u, cx + 3.5f * u, cy + 10.5f * u),
+                        1.5f * u, 1.5f * u, p
+                    )
+                }
+                17 -> { // heart
+                    val path = Path()
+                    path.moveTo(cx, cy + 9f * u)
+                    path.cubicTo(cx - 14f * u, cy - 1f * u, cx - 8f * u, cy - 11f * u, cx, cy - 4f * u)
+                    path.cubicTo(cx + 8f * u, cy - 11f * u, cx + 14f * u, cy - 1f * u, cx, cy + 9f * u)
+                    path.close()
+                    canvas.drawPath(path, p)
+                }
+                18 -> { // flag
+                    canvas.drawRect(RectF(cx - 8f * u, cy - 11f * u, cx - 6f * u, cy + 11f * u), p)
+                    val path = Path()
+                    path.moveTo(cx - 6f * u, cy - 10f * u)
+                    path.lineTo(cx + 10f * u, cy - 5.5f * u)
+                    path.lineTo(cx - 6f * u, cy - 1f * u)
+                    path.close()
+                    canvas.drawPath(path, p)
+                }
+                19 -> { // keyboard
+                    canvas.drawRoundRect(
+                        RectF(cx - 11f * u, cy - 7f * u, cx + 11f * u, cy + 7f * u),
+                        2f * u, 2f * u, p
+                    )
+                    q.style = Paint.Style.FILL
+                    for (i in 0..4) {
+                        val x = cx - 7f * u + i * 3.5f * u
+                        canvas.drawCircle(x, cy - 3.5f * u, 1f * u, q)
+                        canvas.drawCircle(x, cy, 1f * u, q)
+                    }
+                    q.style = Paint.Style.STROKE
+                    q.strokeWidth = 1.6f * u
+                    q.strokeCap = Paint.Cap.ROUND
+                    canvas.drawLine(cx - 5f * u, cy + 4f * u, cx + 5f * u, cy + 4f * u, q)
+                }
                 else -> { // chevron down
                     p.style = Paint.Style.STROKE
                     p.strokeWidth = 2.4f * u
@@ -205,6 +319,11 @@ class KeyboardService : InputMethodService() {
         }
     }
 
+    private fun feedback(v: View) {
+        if (haptic) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        if (sound) v.playSoundEffect(SoundEffectConstants.CLICK)
+    }
+
     private fun iconKey(kind: Int, weight: Float = 1f, onTap: () -> Unit): View {
         val v = IconView(kind)
         v.background = bg(0)
@@ -212,8 +331,7 @@ class KeyboardService : InputMethodService() {
             setMargins(dp(2), dp(3), dp(2), dp(3))
         }
         v.setOnClickListener {
-            if (haptic) it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            if (sound) it.playSoundEffect(SoundEffectConstants.CLICK)
+            feedback(it)
             onTap()
         }
         return v
@@ -351,13 +469,28 @@ class KeyboardService : InputMethodService() {
     private fun saveClips() {
         getSharedPreferences("kb", MODE_PRIVATE).edit()
             .putString(
-                "clips2",
-                clips.joinToString("\u001F") { (if (it.locked) "L" else "U") + it.text }
+                "clips3",
+                clips.joinToString("\u001F") {
+                    (if (it.locked) "L" else "U") + it.time.toString() + "\u001E" + it.text
+                }
             )
             .apply()
     }
 
+    private fun pruneClips() {
+        val days = when (clipExpire) {
+            1 -> 1L
+            2 -> 7L
+            3 -> 30L
+            else -> 0L
+        }
+        if (days == 0L) return
+        val limit = System.currentTimeMillis() - days * 86400000L
+        if (clips.removeAll { !it.locked && it.time < limit }) saveClips()
+    }
+
     private fun recordClip() {
+        if (!clipOn) return
         try {
             val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             val c = cm.primaryClip ?: return
@@ -367,26 +500,47 @@ class KeyboardService : InputMethodService() {
             ) return
             val t = c.getItemAt(0).coerceToText(this)?.toString() ?: return
             if (t.isBlank() || t.length > 2000) return
+            val now = System.currentTimeMillis()
             val existing = clips.firstOrNull { it.text == t }
             if (existing != null) {
                 if (!existing.locked) {
                     clips.remove(existing)
-                    clips.add(0, existing)
+                    clips.add(0, Clip(t, false, now))
                 }
             } else {
-                clips.add(0, Clip(t, false))
-                while (clips.count { !it.locked } > 20) {
+                clips.add(0, Clip(t, false, now))
+                while (clips.count { !it.locked } > 50) {
                     clips.removeAt(clips.indexOfLast { !it.locked })
                 }
             }
+            pruneClips()
             saveClips()
         } catch (e: Exception) {
         }
     }
 
-    // ================= Emoji =================
-    private val emojiTabs = listOf("🕘", "😀", "👍", "🐶", "🍔", "⚽", "🚗", "💡", "❤️", "🏳️")
+    private fun clipKind(t: String): Int {
+        val s = t.trim()
+        if (s.startsWith("http://") || s.startsWith("https://") ||
+            s.startsWith("www.") || s.contains("://")
+        ) return 1
+        if (s.length in 3..20 && s.any { it.isDigit() } &&
+            s.all { it.isDigit() || it == ' ' || it == '+' || it == '-' || it == '(' || it == ')' || it == '.' || it == ',' }
+        ) return 2
+        return 0
+    }
 
+    private fun ago(t: Long): String {
+        val m = (System.currentTimeMillis() - t) / 60000L
+        return when {
+            m < 1 -> "now"
+            m < 60 -> m.toString() + "m"
+            m < 1440 -> (m / 60).toString() + "h"
+            else -> (m / 1440).toString() + "d"
+        }
+    }
+
+    // ================= Emoji =================
     private val emojiRanges: List<List<IntRange>> = listOf(
         listOf(0x1F600..0x1F64F, 0x1F910..0x1F917, 0x1F920..0x1F92F, 0x1F970..0x1F97F, 0x1FAE0..0x1FAE8),
         listOf(
@@ -467,6 +621,7 @@ class KeyboardService : InputMethodService() {
 
     // ================= Colors and sizes =================
     private fun bgColor() = if (dark) 0xFF1B1B1B.toInt() else 0xFFDADADA.toInt()
+    private fun barColor() = if (dark) 0xFF262626.toInt() else 0xFFD0D0D0.toInt()
     private fun keyBg() = if (dark) 0xFF3C3C3C.toInt() else 0xFFFFFFFF.toInt()
     private fun fnBg() = if (dark) 0xFF2A2A2A.toInt() else 0xFFEBEBEB.toInt()
     private fun pressBg() = if (dark) 0xFF5A5A5A.toInt() else 0xFFC4C4C4.toInt()
@@ -492,12 +647,26 @@ class KeyboardService : InputMethodService() {
         sound = p.getInt("sound", 0) == 1
         suggestOn = p.getInt("suggest", 1) == 1
         oneHand = p.getInt("onehand", 0)
-        val saved = p.getString("clips2", "") ?: ""
-        if (saved.isNotEmpty()) {
-            for (s in saved.split("\u001F")) {
-                if (s.length > 1) clips.add(Clip(s.substring(1), s[0] == 'L'))
+        clipOn = p.getInt("cliphist", 1) == 1
+        clipExpire = p.getInt("clipexp", 0)
+
+        val saved3 = p.getString("clips3", "") ?: ""
+        if (saved3.isNotEmpty()) {
+            for (s in saved3.split("\u001F")) {
+                val sep = s.indexOf('\u001E')
+                if (s.length > 1 && sep > 1) {
+                    val tm = s.substring(1, sep).toLongOrNull() ?: System.currentTimeMillis()
+                    clips.add(Clip(s.substring(sep + 1), s[0] == 'L', tm))
+                }
+            }
+        } else {
+            val old = p.getString("clips2", "") ?: ""
+            for (s in old.split("\u001F")) {
+                if (s.length > 1) clips.add(Clip(s.substring(1), s[0] == 'L', System.currentTimeMillis()))
             }
         }
+        pruneClips()
+
         try {
             val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             cm.addPrimaryClipChangedListener { recordClip() }
@@ -549,10 +718,15 @@ class KeyboardService : InputMethodService() {
         root.setBackgroundColor(bgColor())
         root.removeAllViews()
         sugBox = null
-        if (panel != 2) menuClip = null
+        if (panel != 2) {
+            menuClip = null
+            confirmAll = false
+            selMode = false
+            selected.clear()
+        }
         if (panel != 3) selecting = false
         when (panel) {
-            1 -> { renderEmoji(); return }
+            1 -> { root.addView(toolbarRow()); renderEmoji(); return }
             2 -> { root.addView(toolbarRow()); renderClipboard(); return }
             3 -> { root.addView(toolbarRow()); renderTextEdit(); return }
             4 -> { root.addView(toolbarRow()); renderSettings(); return }
@@ -598,6 +772,7 @@ class KeyboardService : InputMethodService() {
     private fun panelHeader(
         title: String,
         rightLabel: String? = null,
+        rightColor: Int = 0xFF2F7CF6.toInt(),
         onRight: () -> Unit = {}
     ): LinearLayout {
         val head = LinearLayout(this).apply {
@@ -623,7 +798,7 @@ class KeyboardService : InputMethodService() {
             head.addView(TextView(this).apply {
                 text = rightLabel
                 textSize = 16f
-                setTextColor(0xFF2F7CF6.toInt())
+                setTextColor(rightColor)
                 setPadding(dp(8), dp(8), dp(8), dp(8))
                 setOnClickListener { onRight() }
             })
@@ -636,56 +811,91 @@ class KeyboardService : InputMethodService() {
         textSize = 14f
         gravity = Gravity.CENTER
         setTextColor(textCol())
-        setPadding(0, dp(60), 0, 0)
+        setPadding(0, dp(50), 0, 0)
     }
 
-    private fun scrollBox() = ScrollView(this).apply {
-        layoutParams = LinearLayout.LayoutParams(MP, dp(200))
+    private fun scrollBox(h: Int = 200) = ScrollView(this).apply {
+        layoutParams = LinearLayout.LayoutParams(MP, dp(h))
         isVerticalScrollBarEnabled = false
     }
 
     // ---------- Emoji ----------
     private fun renderEmoji() {
-        val tabs = newLine()
-        for ((i, ic) in emojiTabs.withIndex()) {
-            tabs.addView(key(ic, 1f, fn = i != emojiCat, hDp = 40, sp = 17f) {
-                emojiCat = i
-                render()
-            })
-        }
-        root.addView(tabs)
-
         val items = if (emojiCat == 0) loadRecent() else emojiList(emojiCat)
-        val scroll = scrollBox()
+        val scroll = scrollBox(188)
+        scroll.setBackgroundColor(if (dark) 0xFF2A2A2A.toInt() else 0xFFF0F0F0.toInt())
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         if (items.isEmpty()) col.addView(hint("No recent emojis"))
-        for (chunk in items.chunked(8)) {
+        for (chunk in items.chunked(7)) {
             val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             for (e in chunk) line.addView(emojiCell(e))
-            repeat(8 - chunk.size) { line.addView(spacer(1f, 44)) }
+            repeat(7 - chunk.size) { line.addView(spacer(1f, 52)) }
             col.addView(line)
         }
         scroll.addView(col)
         root.addView(scroll)
+        root.addView(emojiBar())
+    }
 
-        val b = newLine()
-        b.addView(key("ABC", 1.5f, fn = true) {
+    private fun emojiBarIcon(kind: Int, sel: Boolean, w: Int, onTap: () -> Unit): View {
+        val v = IconView(kind)
+        v.tint = if (sel) 0xFF2F7CF6.toInt() else 0
+        v.cutColor = barColor()
+        v.background = bg(0)
+        v.layoutParams = LinearLayout.LayoutParams(dp(w), dp(46))
+        v.setOnClickListener {
+            feedback(it)
+            onTap()
+        }
+        return v
+    }
+
+    private fun emojiBar(): LinearLayout {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(MP, dp(46))
+            setBackgroundColor(barColor())
+        }
+        bar.addView(emojiBarIcon(19, false, 50) {
             panel = 0
             render()
         })
-        b.addView(key("space", 5f) { type(" ") })
-        b.addView(backKey(1.5f))
-        b.addView(key("↵", 1.5f, fn = true) { enter() })
-        root.addView(b)
+        bar.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(22))
+            setBackgroundColor(0x55888888)
+        })
+        val hs = HorizontalScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
+            isHorizontalScrollBarEnabled = false
+        }
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = FrameLayout.LayoutParams(WC, dp(46))
+        }
+        val kinds = listOf(10, 1, 11, 12, 13, 14, 15, 16, 17, 18)
+        for ((i, k) in kinds.withIndex()) {
+            inner.addView(emojiBarIcon(k, i == emojiCat, 44) {
+                emojiCat = i
+                render()
+            })
+        }
+        hs.addView(inner)
+        bar.addView(hs)
+        val bk = key("⌫", 1f, flat = true, repeat = true) { backspace() }
+        bk.layoutParams = LinearLayout.LayoutParams(dp(54), dp(46))
+        bar.addView(bk)
+        return bar
     }
 
     private fun emojiCell(e: String) = TextView(this).apply {
         text = e
-        textSize = 24f
+        textSize = 28f
         gravity = Gravity.CENTER
-        layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
+        layoutParams = LinearLayout.LayoutParams(0, dp(52), 1f)
         setOnClickListener {
-            if (haptic) it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            feedback(it)
             currentInputConnection?.commitText(e, 1)
             addRecent(e)
         }
@@ -706,24 +916,107 @@ class KeyboardService : InputMethodService() {
     }
 
     // ---------- Clipboard ----------
-    private fun renderClipboard() {
-        recordClip()
-        root.addView(panelHeader("Clipboard", "Delete all") {
+    private fun deleteAllTap() {
+        if (confirmAll) {
             clips.removeAll { !it.locked }
             saveClips()
+            confirmAll = false
             render()
-        })
+        } else {
+            confirmAll = true
+            render()
+            uiHandler.postDelayed({
+                if (confirmAll) {
+                    confirmAll = false
+                    if (panel == 2) render()
+                }
+            }, 3000)
+        }
+    }
+
+    private fun pasteSelected() {
+        val text = clips.filter { it in selected }.reversed().joinToString("\n") { it.text }
+        if (text.isNotEmpty()) currentInputConnection?.commitText(text, 1)
+        selMode = false
+        selected.clear()
+        render()
+    }
+
+    private fun lockSelected() {
+        val items = clips.filter { it in selected }
+        val allLocked = items.isNotEmpty() && items.all { it.locked }
+        for (c in items) c.locked = !allLocked
+        saveClips()
+        selMode = false
+        selected.clear()
+        render()
+    }
+
+    private fun deleteSelected() {
+        clips.removeAll { it in selected }
+        saveClips()
+        selMode = false
+        selected.clear()
+        render()
+    }
+
+    private fun renderClipboard() {
+        recordClip()
+        if (selMode) {
+            root.addView(TextView(this).apply {
+                text = selected.size.toString() + " selected"
+                textSize = 17f
+                setTextColor(textCol())
+                setPadding(dp(10), dp(10), 0, dp(4))
+            })
+            val bar = newLine()
+            bar.addView(key("Done", 1f, fn = true, hDp = 38, sp = 13f) {
+                selMode = false
+                selected.clear()
+                render()
+            })
+            bar.addView(key("Paste", 1f, fn = true, hDp = 38, sp = 13f) { pasteSelected() })
+            bar.addView(key("Lock", 1f, fn = true, hDp = 38, sp = 13f) { lockSelected() })
+            bar.addView(key("Delete", 1f, fn = true, hDp = 38, sp = 13f) { deleteSelected() })
+            root.addView(bar)
+        } else {
+            root.addView(
+                panelHeader(
+                    "Clipboard",
+                    if (confirmAll) "Confirm?" else "Delete all",
+                    if (confirmAll) 0xFFD93025.toInt() else 0xFF2F7CF6.toInt()
+                ) { deleteAllTap() }
+            )
+            val chips = newLine()
+            val names = listOf("All", "Locked", "Links", "Numbers")
+            for ((i, n) in names.withIndex()) {
+                chips.addView(key(n, 1f, fn = i != clipFilter, accent = i == clipFilter, hDp = 34, sp = 13f) {
+                    clipFilter = i
+                    render()
+                })
+            }
+            root.addView(chips)
+        }
+
+        val base = clips.sortedByDescending { it.locked }
+        val shown = when (clipFilter) {
+            1 -> base.filter { it.locked }
+            2 -> base.filter { clipKind(it.text) == 1 }
+            3 -> base.filter { clipKind(it.text) == 2 }
+            else -> base
+        }
 
         val frame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(MP, dp(200))
+            layoutParams = LinearLayout.LayoutParams(MP, dp(172))
         }
         val scroll = ScrollView(this).apply {
             layoutParams = FrameLayout.LayoutParams(MP, MP)
             isVerticalScrollBarEnabled = false
         }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val shown = clips.sortedByDescending { it.locked }
-        if (shown.isEmpty()) col.addView(hint("Copy something and it will appear here"))
+        if (shown.isEmpty()) {
+            col.addView(hint(if (clipOn) "Nothing here yet" else "Clipboard history is off"))
+        }
         for (chunk in shown.chunked(3)) {
             val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             for (c in chunk) line.addView(clipCard(c))
@@ -741,31 +1034,58 @@ class KeyboardService : InputMethodService() {
         root.addView(frame)
     }
 
-    private fun clipCard(c: Clip) = TextView(this).apply {
-        text = c.text
-        textSize = 13f
-        maxLines = 5
-        ellipsize = TextUtils.TruncateAt.END
-        setTextColor(textCol())
-        setPadding(dp(8), dp(8), dp(8), dp(8))
-        gravity = Gravity.TOP or Gravity.START
-        background = GradientDrawable().apply {
-            cornerRadius = dp(8).toFloat()
-            setColor(keyBg())
-            if (c.locked) setStroke(dp(2), 0xFF2F7CF6.toInt())
+    private fun clipCard(c: Clip): View {
+        val isSel = c in selected
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(7), dp(8), dp(5))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                if (isSel) {
+                    setStroke(dp(2), 0xFF34A853.toInt())
+                } else if (c.locked) {
+                    setStroke(dp(2), 0xFF2F7CF6.toInt())
+                }
+                setColor(keyBg())
+            }
+            layoutParams = LinearLayout.LayoutParams(0, dp(92), 1f).apply {
+                setMargins(dp(3), dp(3), dp(3), dp(3))
+            }
         }
-        layoutParams = LinearLayout.LayoutParams(0, dp(96), 1f).apply {
-            setMargins(dp(3), dp(3), dp(3), dp(3))
+        card.addView(TextView(this).apply {
+            text = c.text
+            textSize = 13f
+            maxLines = 4
+            ellipsize = TextUtils.TruncateAt.END
+            setTextColor(textCol())
+            layoutParams = LinearLayout.LayoutParams(MP, 0, 1f)
+        })
+        val kind = clipKind(c.text)
+        card.addView(TextView(this).apply {
+            text = (if (isSel) "✓ " else if (c.locked) "Locked · " else "") +
+                ago(c.time) +
+                (if (kind == 1) " · Link" else if (kind == 2) " · Number" else "")
+            textSize = 10f
+            maxLines = 1
+            setTextColor(0xFF8A8A8A.toInt())
+        })
+        card.setOnClickListener {
+            feedback(it)
+            if (selMode) {
+                if (c in selected) selected.remove(c) else selected.add(c)
+                render()
+            } else {
+                currentInputConnection?.commitText(c.text, 1)
+            }
         }
-        setOnClickListener {
-            if (haptic) it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            currentInputConnection?.commitText(c.text, 1)
-        }
-        setOnLongClickListener {
-            menuClip = c
-            render()
+        card.setOnLongClickListener {
+            if (!selMode) {
+                menuClip = c
+                render()
+            }
             true
         }
+        return card
     }
 
     private fun clipMenuView(c: Clip): View {
@@ -784,7 +1104,7 @@ class KeyboardService : InputMethodService() {
                 setColor(keyBg())
             }
             layoutParams = FrameLayout.LayoutParams(dp(260), WC, Gravity.CENTER)
-            setPadding(dp(6), dp(6), dp(6), dp(6))
+            setPadding(dp(6), dp(4), dp(6), dp(4))
         }
         card.addView(menuItem("Delete from clipboard") {
             clips.remove(c)
@@ -798,6 +1118,13 @@ class KeyboardService : InputMethodService() {
             saveClips()
             render()
         })
+        card.addView(menuItem("Select") {
+            selMode = true
+            selected.clear()
+            selected.add(c)
+            menuClip = null
+            render()
+        })
         dim.addView(card)
         return dim
     }
@@ -806,7 +1133,7 @@ class KeyboardService : InputMethodService() {
         text = label
         textSize = 16f
         setTextColor(textCol())
-        setPadding(dp(18), dp(16), dp(18), dp(16))
+        setPadding(dp(18), dp(14), dp(18), dp(14))
         setOnClickListener { onTap() }
     }
 
@@ -983,6 +1310,17 @@ class KeyboardService : InputMethodService() {
             putPref("onehand", it)
             render()
         }
+        row("Clipboard history", listOf("On", "Off"), if (clipOn) 0 else 1) {
+            clipOn = it == 0
+            putPref("cliphist", if (clipOn) 1 else 0)
+            render()
+        }
+        row("Auto-delete clips", listOf("Never", "1 day", "7 days", "30 days"), clipExpire) {
+            clipExpire = it
+            putPref("clipexp", it)
+            pruneClips()
+            render()
+        }
 
         col.addView(TextView(this).apply {
             text = "Clear data"
@@ -1084,7 +1422,7 @@ class KeyboardService : InputMethodService() {
         }
         line.addView(key(",") { type(",") })
         val spaceLabel = if (lang == 1) "◂  বাংলা  ▸" else "◂  English (US)  ▸"
-        line.addView(key(spaceLabel, 5f, onLong = { toggleLang() }) { type(" ") })
+        line.addView(key(spaceLabel, 5f, onSwipe = { toggleLang() }) { type(" ") })
         line.addView(key(if (lang == 0) "." else "।") { type(if (lang == 0) "." else "।") })
         line.addView(key("↵", 1.5f, fn = true) { enter() })
         return line
@@ -1189,7 +1527,7 @@ class KeyboardService : InputMethodService() {
         flat: Boolean = false,
         hDp: Int = 0,
         sp: Float = 0f,
-        onLong: (() -> Unit)? = null,
+        onSwipe: ((Int) -> Unit)? = null,
         onTap: () -> Unit
     ): Button = Button(this).apply {
         val h = if (hDp > 0) hDp else keyH()
@@ -1201,7 +1539,7 @@ class KeyboardService : InputMethodService() {
             else -> 14f
         }
         setTextColor(if (accent) 0xFF2F7CF6.toInt() else textCol())
-        background = bg(if (flat) bgColor() else if (fn) fnBg() else keyBg())
+        background = bg(if (flat) 0 else if (fn) fnBg() else keyBg())
         stateListAnimator = null
         minWidth = 0
         minimumWidth = 0
@@ -1222,8 +1560,7 @@ class KeyboardService : InputMethodService() {
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
                         v.isPressed = true
-                        if (haptic) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        if (sound) v.playSoundEffect(SoundEffectConstants.CLICK)
+                        feedback(v)
                         onTap()
                         uiHandler.postDelayed(r, 400)
                     }
@@ -1234,17 +1571,41 @@ class KeyboardService : InputMethodService() {
                 }
                 true
             }
+        } else if (onSwipe != null) {
+            var downX = 0f
+            var swiped = false
+            setOnTouchListener { v, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = e.x
+                        swiped = false
+                        v.isPressed = true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (!swiped && Math.abs(e.x - downX) > dp(40)) {
+                            swiped = true
+                            v.isPressed = false
+                            feedback(v)
+                            onSwipe(if (e.x > downX) 1 else -1)
+                        }
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        v.isPressed = false
+                        if (!swiped) {
+                            feedback(v)
+                            onTap()
+                        }
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                    }
+                }
+                true
+            }
         } else {
             setOnClickListener {
-                if (haptic) it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                if (sound) it.playSoundEffect(SoundEffectConstants.CLICK)
+                feedback(it)
                 onTap()
-            }
-            if (onLong != null) {
-                setOnLongClickListener {
-                    onLong()
-                    true
-                }
             }
         }
     }
