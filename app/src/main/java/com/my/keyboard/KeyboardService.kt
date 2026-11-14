@@ -96,6 +96,12 @@ class KeyboardService : InputMethodService() {
     private val bigrams = HashMap<String, Int>()
     private var bigramsLoaded = false
 
+    // letter keys that show a preview bubble (used for finger sliding between keys)
+    private class PreviewInfo(val label: String, val onTap: () -> Unit)
+
+    private val previewKeys = ArrayList<View>()
+    private val curKeyFor = HashMap<View, View?>()
+
     // emoji search
     private val searchQ = StringBuilder()
     private var searchCard: LinearLayout? = null
@@ -466,18 +472,20 @@ class KeyboardService : InputMethodService() {
         if (pv == null) {
             pv = TextView(this)
             pv.gravity = Gravity.CENTER
-            pv.textSize = 26f
+            pv.textSize = 28f
             pv.elevation = dp(6).toFloat()
             previewView = pv
         }
         attach(pv)
-        val w = v.width + dp(8)
-        val h = v.height + dp(8)
         val pos = relPos(v)
+        val w = maxOf((v.width * 1.25f).toInt(), dp(44))
+        var h = (v.height * 1.5f).toInt()
+        val room = pos[1] + dp(8)
+        if (h > room) h = maxOf(room, v.height)
         var x = pos[0] + (v.width - w) / 2
         if (x > host.width - w) x = host.width - w
         if (x < 0) x = 0
-        var y = pos[1] - h + dp(2)
+        var y = pos[1] - h + dp(6)
         if (y < 0) y = 0
         pv.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.TOP or Gravity.START)
         pv.translationX = x.toFloat()
@@ -495,6 +503,57 @@ class KeyboardService : InputMethodService() {
     private fun hidePreview() {
         uiHandler.removeCallbacks(hidePreviewRunnable)
         uiHandler.postDelayed(hidePreviewRunnable, 90)
+    }
+
+    // ---- tap typing with a preview bubble; sliding the finger moves to the key under it ----
+    private fun keyAt(x: Float, y: Float): View? {
+        val loc = IntArray(2)
+        for (k in previewKeys) {
+            k.getLocationOnScreen(loc)
+            if (x >= loc[0] && x < loc[0] + k.width && y >= loc[1] && y < loc[1] + k.height) return k
+        }
+        return null
+    }
+
+    private fun infoOf(v: View): PreviewInfo? = v.tag as? PreviewInfo
+
+    private fun handlePreviewTouch(v: View, e: MotionEvent) {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                curKeyFor[v] = v
+                v.isPressed = true
+                val info = infoOf(v)
+                if (info != null) showPreview(v, info.label)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val cur = curKeyFor[v]
+                val under = keyAt(e.rawX, e.rawY)
+                if (under != null && under !== cur) {
+                    cur?.isPressed = false
+                    under.isPressed = true
+                    curKeyFor[v] = under
+                    val info = infoOf(under)
+                    if (info != null) showPreview(under, info.label)
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                val cur = curKeyFor.remove(v)
+                cur?.isPressed = false
+                hidePreview()
+                if (cur != null) {
+                    val info = infoOf(cur)
+                    if (info != null) {
+                        feedback(cur)
+                        info.onTap()
+                    }
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                val cur = curKeyFor.remove(v)
+                cur?.isPressed = false
+                hidePreview()
+            }
+        }
     }
 
     private fun langName(l: Int) = if (l == 1) "বাংলা" else "English (US)"
@@ -1160,6 +1219,8 @@ class KeyboardService : InputMethodService() {
         }
         previewView?.visibility = View.GONE
         hideLangPopup()
+        previewKeys.clear()
+        curKeyFor.clear()
         val side = if (oneHand == 0) 0 else (resources.displayMetrics.widthPixels * 0.22f).toInt()
         root.setPadding(
             dp(4) + (if (oneHand == 2) side else 0), dp(6),
@@ -2085,202 +2146,3 @@ class KeyboardService : InputMethodService() {
                 caps -> {
                     caps = false
                     shift = false
-                }
-                now - lastShiftTap < 400 -> {
-                    caps = true
-                    shift = true
-                }
-                else -> shift = !shift
-            }
-            lastShiftTap = now
-            render()
-        }
-
-    private fun backKey(w: Float): Button =
-        key("⌫", w, fn = true, repeat = true) { backspace() }
-
-    private fun addKeys(line: LinearLayout, spec: String, marks: Boolean = false) {
-        for (tok in spec.split(" ")) {
-            val i = tok.indexOf('|')
-            val commit = if (i > 0) tok.substring(i + 1) else tok
-            var label = if (i > 0) tok.substring(0, i) else tok
-            if (marks && i <= 0 && label[0] in "ািীুূৃেৈোৌ্ংঃঁ") label = "◌" + label
-            line.addView(key(label, preview = true) { type(commit) })
-        }
-    }
-
-    // ================= Typing =================
-    private fun isBoundary(s: String) =
-        s.isNotEmpty() && !(s[0].isLetter() || s[0] in '\u0980'..'\u09FF')
-
-    private fun type(s: String) {
-        if (panel == 6) {
-            searchType(s)
-            return
-        }
-        val ic = currentInputConnection ?: return
-        if (isBoundary(s)) learnCurrent()
-        ic.commitText(s, 1)
-        barMode = 2
-        barManual = false
-        if (shift && !caps) {
-            shift = false
-            render()
-        } else {
-            refreshSuggestions()
-        }
-    }
-
-    private fun backspace() {
-        if (panel == 6) {
-            if (searchQ.isNotEmpty()) searchQ.setLength(searchQ.length - 1)
-            updateSearchUi()
-            return
-        }
-        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
-        refreshSuggestions()
-    }
-
-    private fun enter() {
-        learnCurrent()
-        if (!sendDefaultEditorAction(true)) {
-            sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
-        }
-        refreshSuggestions()
-    }
-
-    private fun newLine() = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-        layoutParams = LinearLayout.LayoutParams(MP, WC)
-    }
-
-    private fun spacer(w: Float, hDp: Int = 0) = View(this).apply {
-        layoutParams = LinearLayout.LayoutParams(0, dp(if (hDp > 0) hDp else keyH()), w)
-    }
-
-    private fun bg(color: Int): StateListDrawable {
-        fun shape(c: Int) = GradientDrawable().apply {
-            cornerRadius = dp(8).toFloat()
-            setColor(c)
-        }
-        return StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), shape(pressBg()))
-            addState(intArrayOf(), shape(color))
-        }
-    }
-
-    private fun key(
-        label: String,
-        weight: Float = 1f,
-        fn: Boolean = false,
-        accent: Boolean = false,
-        repeat: Boolean = false,
-        flat: Boolean = false,
-        preview: Boolean = false,
-        hDp: Int = 0,
-        sp: Float = 0f,
-        onSwipe: ((Int) -> Unit)? = null,
-        onTap: () -> Unit
-    ): Button = Button(this).apply {
-        val h = if (hDp > 0) hDp else keyH()
-        text = label
-        isAllCaps = false
-        textSize = if (sp > 0f) sp else when {
-            label.length <= 1 -> 20f
-            label.length <= 3 -> 17f
-            else -> 14f
-        }
-        setTextColor(if (accent) 0xFF2F7CF6.toInt() else textCol())
-        background = bg(if (flat) 0 else if (fn) fnBg() else keyBg())
-        stateListAnimator = null
-        minWidth = 0
-        minimumWidth = 0
-        minHeight = 0
-        minimumHeight = 0
-        setPadding(0, 0, 0, 0)
-        layoutParams = LinearLayout.LayoutParams(0, dp(h), weight).apply {
-            setMargins(dp(2), dp(3), dp(2), dp(3))
-        }
-        if (repeat) {
-            val r = object : Runnable {
-                override fun run() {
-                    onTap()
-                    uiHandler.postDelayed(this, 45)
-                }
-            }
-            setOnTouchListener { v, e ->
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        v.isPressed = true
-                        feedback(v)
-                        onTap()
-                        uiHandler.postDelayed(r, 400)
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        v.isPressed = false
-                        uiHandler.removeCallbacks(r)
-                    }
-                }
-                true
-            }
-        } else if (onSwipe != null) {
-            var downX = 0f
-            var swiped = false
-            var dir = 1
-            setOnTouchListener { v, e ->
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        downX = e.x
-                        swiped = false
-                        v.isPressed = true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val far = Math.abs(e.x - downX) > dp(14)
-                        if (far && !swiped) {
-                            swiped = true
-                            dir = if (e.x > downX) 1 else -1
-                            if (panel != 6) showLangPopup(v, dir, langName(1 - lang))
-                        } else if (!far && swiped) {
-                            swiped = false
-                            hideLangPopup()
-                        }
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        v.isPressed = false
-                        if (swiped) {
-                            hideLangPopup()
-                            feedback(v)
-                            onSwipe(dir)
-                            if (panel != 6) flashLangPopup()
-                        } else {
-                            feedback(v)
-                            onTap()
-                        }
-                    }
-                    MotionEvent.ACTION_CANCEL -> {
-                        v.isPressed = false
-                        hideLangPopup()
-                    }
-                }
-                true
-            }
-        } else {
-            setOnClickListener {
-                feedback(it)
-                onTap()
-            }
-            if (preview) {
-                setOnTouchListener { v, e ->
-                    when (e.action) {
-                        MotionEvent.ACTION_DOWN -> showPreview(v, label)
-                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> hidePreview()
-                    }
-                    false
-                }
-            }
-        }
-    }
-
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-}
