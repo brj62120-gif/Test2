@@ -25,6 +25,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SoundEffectConstants
 import android.view.View
+import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
@@ -435,6 +436,16 @@ class KeyboardService : InputMethodService() {
     }
 
     // ================= Popups (key preview, language, toast) =================
+    // Make sure a popup view lives inside the CURRENT overlay (Android can rebuild the keyboard view).
+    private fun attach(tv: TextView) {
+        val par = tv.parent
+        if (par !== overlay) {
+            if (par is ViewGroup) par.removeView(tv)
+            overlay.addView(tv)
+        }
+        tv.bringToFront()
+    }
+
     private fun relPos(v: View): IntArray {
         val a = IntArray(2)
         val b = IntArray(2)
@@ -457,9 +468,9 @@ class KeyboardService : InputMethodService() {
             pv.gravity = Gravity.CENTER
             pv.textSize = 26f
             pv.elevation = dp(6).toFloat()
-            overlay.addView(pv)
             previewView = pv
         }
+        attach(pv)
         val w = v.width + dp(8)
         val h = v.height + dp(8)
         val pos = relPos(v)
@@ -476,6 +487,7 @@ class KeyboardService : InputMethodService() {
         pv.text = label
         pv.scaleX = 0.88f
         pv.scaleY = 0.88f
+        pv.alpha = 1f
         pv.visibility = View.VISIBLE
         pv.animate().scaleX(1f).scaleY(1f).setDuration(60).start()
     }
@@ -496,9 +508,9 @@ class KeyboardService : InputMethodService() {
             lp.gravity = Gravity.CENTER
             lp.textSize = 15f
             lp.elevation = dp(6).toFloat()
-            overlay.addView(lp)
             langPopup = lp
         }
+        attach(lp)
         val w = dp(160)
         val h = dp(46)
         val pos = relPos(anchor)
@@ -544,9 +556,9 @@ class KeyboardService : InputMethodService() {
             tv.setTextColor(0xFFFFFFFF.toInt())
             tv.gravity = Gravity.CENTER
             tv.setPadding(dp(14), dp(10), dp(14), dp(10))
-            overlay.addView(tv)
             toastView = tv
         }
+        attach(tv)
         val bgd = GradientDrawable()
         bgd.cornerRadius = dp(18).toFloat()
         bgd.setColor(0xEE333333.toInt())
@@ -1091,6 +1103,10 @@ class KeyboardService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
+        // Android may build the keyboard view again: forget popups that belonged to the old one.
+        previewView = null
+        langPopup = null
+        toastView = null
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
