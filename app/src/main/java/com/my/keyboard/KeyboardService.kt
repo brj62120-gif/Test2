@@ -2146,3 +2146,200 @@ class KeyboardService : InputMethodService() {
                 caps -> {
                     caps = false
                     shift = false
+                }
+                now - lastShiftTap < 400 -> {
+                    caps = true
+                    shift = true
+                }
+                else -> shift = !shift
+            }
+            lastShiftTap = now
+            render()
+        }
+
+    private fun backKey(w: Float): Button =
+        key("⌫", w, fn = true, repeat = true) { backspace() }
+
+    private fun addKeys(line: LinearLayout, spec: String, marks: Boolean = false) {
+        for (tok in spec.split(" ")) {
+            val i = tok.indexOf('|')
+            val commit = if (i > 0) tok.substring(i + 1) else tok
+            var label = if (i > 0) tok.substring(0, i) else tok
+            if (marks && i <= 0 && label[0] in "ািীুূৃেৈোৌ্ংঃঁ") label = "◌" + label
+            line.addView(key(label, preview = true) { type(commit) })
+        }
+    }
+
+    // ================= Typing =================
+    private fun isBoundary(s: String) =
+        s.isNotEmpty() && !(s[0].isLetter() || s[0] in '\u0980'..'\u09FF')
+
+    private fun type(s: String) {
+        if (panel == 6) {
+            searchType(s)
+            return
+        }
+        val ic = currentInputConnection ?: return
+        if (isBoundary(s)) learnCurrent()
+        ic.commitText(s, 1)
+        barMode = 2
+        barManual = false
+        if (shift && !caps) {
+            shift = false
+            render()
+        } else {
+            refreshSuggestions()
+        }
+    }
+
+    private fun backspace() {
+        if (panel == 6) {
+            if (searchQ.isNotEmpty()) searchQ.setLength(searchQ.length - 1)
+            updateSearchUi()
+            return
+        }
+        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+        refreshSuggestions()
+    }
+
+    private fun enter() {
+        learnCurrent()
+        if (!sendDefaultEditorAction(true)) {
+            sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
+        }
+        refreshSuggestions()
+    }
+
+    private fun newLine() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        layoutParams = LinearLayout.LayoutParams(MP, WC)
+    }
+
+    private fun spacer(w: Float, hDp: Int = 0) = View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(0, dp(if (hDp > 0) hDp else keyH()), w)
+    }
+
+    private fun bg(color: Int): StateListDrawable {
+        fun shape(c: Int) = GradientDrawable().apply {
+            cornerRadius = dp(8).toFloat()
+            setColor(c)
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), shape(pressBg()))
+            addState(intArrayOf(), shape(color))
+        }
+    }
+
+    private fun key(
+        label: String,
+        weight: Float = 1f,
+        fn: Boolean = false,
+        accent: Boolean = false,
+        repeat: Boolean = false,
+        flat: Boolean = false,
+        preview: Boolean = false,
+        hDp: Int = 0,
+        sp: Float = 0f,
+        onSwipe: ((Int) -> Unit)? = null,
+        onTap: () -> Unit
+    ): Button = Button(this).apply {
+        val h = if (hDp > 0) hDp else keyH()
+        text = label
+        isAllCaps = false
+        textSize = if (sp > 0f) sp else when {
+            label.length <= 1 -> 20f
+            label.length <= 3 -> 17f
+            else -> 14f
+        }
+        setTextColor(if (accent) 0xFF2F7CF6.toInt() else textCol())
+        background = bg(if (flat) 0 else if (fn) fnBg() else keyBg())
+        stateListAnimator = null
+        minWidth = 0
+        minimumWidth = 0
+        minHeight = 0
+        minimumHeight = 0
+        setPadding(0, 0, 0, 0)
+        layoutParams = LinearLayout.LayoutParams(0, dp(h), weight).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
+        }
+        if (repeat) {
+            val r = object : Runnable {
+                override fun run() {
+                    onTap()
+                    uiHandler.postDelayed(this, 45)
+                }
+            }
+            setOnTouchListener { v, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        v.isPressed = true
+                        feedback(v)
+                        onTap()
+                        uiHandler.postDelayed(r, 400)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                        uiHandler.removeCallbacks(r)
+                    }
+                }
+                true
+            }
+        } else if (onSwipe != null) {
+            var downX = 0f
+            var swiped = false
+            var dir = 1
+            setOnTouchListener { v, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = e.x
+                        swiped = false
+                        v.isPressed = true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val far = Math.abs(e.x - downX) > dp(14)
+                        if (far && !swiped) {
+                            swiped = true
+                            dir = if (e.x > downX) 1 else -1
+                            if (panel != 6) showLangPopup(v, dir, langName(1 - lang))
+                        } else if (!far && swiped) {
+                            swiped = false
+                            hideLangPopup()
+                        }
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        v.isPressed = false
+                        if (swiped) {
+                            hideLangPopup()
+                            feedback(v)
+                            onSwipe(dir)
+                            if (panel != 6) flashLangPopup()
+                        } else {
+                            feedback(v)
+                            onTap()
+                        }
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                        hideLangPopup()
+                    }
+                }
+                true
+            }
+        } else if (preview) {
+            previewKeys.add(this)
+            tag = PreviewInfo(label, onTap)
+            setOnTouchListener { v, e ->
+                handlePreviewTouch(v, e)
+                true
+            }
+        } else {
+            setOnClickListener {
+                feedback(it)
+                onTap()
+            }
+        }
+    }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+}
