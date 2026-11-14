@@ -1,5 +1,6 @@
 package com.my.keyboard
 
+import android.animation.ValueAnimator
 import android.content.ClipboardManager
 import android.content.res.Configuration
 import android.graphics.Canvas
@@ -14,7 +15,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
@@ -42,8 +46,11 @@ class KeyboardService : InputMethodService() {
     private var mode = 0 // 0 = অক্ষর, 1 = symbol 1/2, 2 = symbol 2/2
     private var bnPage = 0
     private var dark = false
-    private var panel = 0 // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more
+    // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more, 6 = emoji search
+    private var panel = 0
     private var emojiCat = 1
+    private var emojiSlide = 0
+    private var emojiRipple = false
     private var selecting = false
     private var barMode = 0 // 0 = auto (tools), 1 = tools, 2 = suggestions
     private var barManual = false
@@ -67,6 +74,7 @@ class KeyboardService : InputMethodService() {
     private var spaceKey: View? = null
     private var previewView: TextView? = null
     private var langPopup: TextView? = null
+    private var toastView: TextView? = null
     private val uiHandler = Handler(Looper.getMainLooper())
     private val hidePreviewRunnable = Runnable { previewView?.visibility = View.GONE }
     private val hideLangRunnable = Runnable {
@@ -75,11 +83,24 @@ class KeyboardService : InputMethodService() {
             lp.animate().alpha(0f).setDuration(150).withEndAction { lp.visibility = View.GONE }.start()
         }
     }
+    private val hideToastRunnable = Runnable {
+        val tv = toastView
+        if (tv != null) {
+            tv.animate().alpha(0f).setDuration(200).withEndAction { tv.visibility = View.GONE }.start()
+        }
+    }
     private val emojiCache = HashMap<Int, List<String>>()
     private val learned = HashMap<String, Int>()
     private var learnedLoaded = false
     private val bigrams = HashMap<String, Int>()
     private var bigramsLoaded = false
+
+    // emoji search
+    private val searchQ = StringBuilder()
+    private var searchCard: LinearLayout? = null
+    private var searchTv: TextView? = null
+    private var searchClear: View? = null
+    private var searchIndex: List<Pair<String, String>>? = null
 
     private class Clip(var text: String, var locked: Boolean, val time: Long)
 
@@ -336,6 +357,24 @@ class KeyboardService : InputMethodService() {
                     q.strokeCap = Paint.Cap.ROUND
                     canvas.drawLine(cx - 5f * u, cy + 4f * u, cx + 5f * u, cy + 4f * u, q)
                 }
+                21 -> { // magnifier
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 2.4f * u
+                    p.strokeCap = Paint.Cap.ROUND
+                    canvas.drawCircle(cx - 2f * u, cy - 2f * u, 7f * u, p)
+                    canvas.drawLine(cx + 3f * u, cy + 3f * u, cx + 9f * u, cy + 9f * u, p)
+                }
+                22 -> { // chevron left
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 2.4f * u
+                    p.strokeCap = Paint.Cap.ROUND
+                    p.strokeJoin = Paint.Join.ROUND
+                    val path = Path()
+                    path.moveTo(cx + 3f * u, cy - 7f * u)
+                    path.lineTo(cx - 4f * u, cy)
+                    path.lineTo(cx + 3f * u, cy + 7f * u)
+                    canvas.drawPath(path, p)
+                }
                 else -> { // chevron down
                     p.style = Paint.Style.STROKE
                     p.strokeWidth = 2.4f * u
@@ -369,7 +408,33 @@ class KeyboardService : InputMethodService() {
         return v
     }
 
-    // ================= Popups (key preview and language) =================
+    private fun fnIcon(kind: Int, weight: Float, onTap: () -> Unit): View {
+        val v = IconView(kind)
+        v.background = bg(fnBg())
+        v.layoutParams = LinearLayout.LayoutParams(0, dp(keyH()), weight).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
+        }
+        v.setOnClickListener {
+            feedback(it)
+            onTap()
+        }
+        return v
+    }
+
+    private fun ovalBg(): StateListDrawable {
+        val pressed = GradientDrawable()
+        pressed.shape = GradientDrawable.OVAL
+        pressed.setColor(0x44707070)
+        val normal = GradientDrawable()
+        normal.shape = GradientDrawable.OVAL
+        normal.setColor(0)
+        val sl = StateListDrawable()
+        sl.addState(intArrayOf(android.R.attr.state_pressed), pressed)
+        sl.addState(intArrayOf(), normal)
+        return sl
+    }
+
+    // ================= Popups (key preview, language, toast) =================
     private fun relPos(v: View): IntArray {
         val a = IntArray(2)
         val b = IntArray(2)
@@ -468,6 +533,36 @@ class KeyboardService : InputMethodService() {
                 uiHandler.postDelayed(hideLangRunnable, 650)
             }
         }, 70)
+    }
+
+    private fun showToast(msg: String) {
+        if (!::host.isInitialized) return
+        var tv = toastView
+        if (tv == null) {
+            tv = TextView(this)
+            tv.textSize = 13f
+            tv.setTextColor(0xFFFFFFFF.toInt())
+            tv.gravity = Gravity.CENTER
+            tv.setPadding(dp(14), dp(10), dp(14), dp(10))
+            overlay.addView(tv)
+            toastView = tv
+        }
+        val bgd = GradientDrawable()
+        bgd.cornerRadius = dp(18).toFloat()
+        bgd.setColor(0xEE333333.toInt())
+        tv.background = bgd
+        tv.text = msg
+        val lpar = FrameLayout.LayoutParams(WC, WC, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+        lpar.topMargin = dp(10)
+        lpar.leftMargin = dp(16)
+        lpar.rightMargin = dp(16)
+        tv.layoutParams = lpar
+        tv.animate().cancel()
+        tv.alpha = 0f
+        tv.visibility = View.VISIBLE
+        tv.animate().alpha(1f).setDuration(150).start()
+        uiHandler.removeCallbacks(hideToastRunnable)
+        uiHandler.postDelayed(hideToastRunnable, 2600)
     }
 
     // ================= Suggestions =================
@@ -778,7 +873,7 @@ class KeyboardService : InputMethodService() {
         }
     }
 
-    // ================= Emoji =================
+    // ================= Emoji data =================
     private val emojiRanges: List<List<IntRange>> = listOf(
         listOf(0x1F600..0x1F64F, 0x1F910..0x1F917, 0x1F920..0x1F92F, 0x1F970..0x1F97F, 0x1FAE0..0x1FAE8),
         listOf(
@@ -857,6 +952,89 @@ class KeyboardService : InputMethodService() {
             if (cat == 9) buildFlags() else buildEmojis(emojiRanges[cat - 1])
         }
 
+    // ================= Emoji search data =================
+    private val aliasData = listOf(
+        "😂🤣" to "lol laugh haha funny lmao joy",
+        "❤️😍🥰😘💕💖💗💓" to "love heart like crush",
+        "😢😭" to "sad cry crying upset tears",
+        "😀😊😁😄😃" to "happy smile smiling glad",
+        "😠😡🤬" to "angry mad rage furious",
+        "👌👍" to "ok okay good fine nice yes",
+        "🙏" to "thanks thank pray please namaste hope",
+        "👎❌🙅" to "no bad wrong dislike",
+        "👋" to "hi hello hey bye wave",
+        "🎉🥳🎊" to "party celebrate congrats congratulations",
+        "🔥" to "fire hot lit",
+        "😎" to "cool sunglasses",
+        "😴💤🌙" to "sleep night tired sleepy",
+        "🎂🎈🎁" to "birthday cake gift",
+        "💰💵" to "money cash rich dollar",
+        "🍔🍕🍟" to "food eat hungry",
+        "😘💋" to "kiss",
+        "😱😨" to "scared fear shock",
+        "🤔" to "think thinking hmm",
+        "😉" to "wink"
+    )
+
+    private val aliasMap: HashMap<Int, String> by lazy {
+        val m = HashMap<Int, String>()
+        for ((g, t) in aliasData) {
+            var i = 0
+            while (i < g.length) {
+                val cp = g.codePointAt(i)
+                i += Character.charCount(cp)
+                if (cp != 0xFE0F) m[cp] = (m[cp] ?: "") + " " + t
+            }
+        }
+        m
+    }
+
+    private val popularEmoji = listOf(
+        "😂", "❤️", "😘", "🤣", "😍", "😊", "😁", "😭", "😉", "😅", "🤗", "🙄", "😋", "🤔"
+    )
+
+    private fun buildSearchIndex(): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        for (cat in 1..8) {
+            for (e in emojiList(cat)) {
+                val cp = e.codePointAt(0)
+                val name = if (Build.VERSION.SDK_INT >= 24) (Character.getName(cp) ?: "") else ""
+                out.add(Pair(e, name.lowercase() + " " + (aliasMap[cp] ?: "")))
+            }
+        }
+        for (e in emojiList(9)) {
+            val c1 = (e.codePointAt(0) - 0x1F1E6 + 'A'.code).toChar()
+            val c2 = (e.codePointAt(2) - 0x1F1E6 + 'A'.code).toChar()
+            val code = "" + c1 + c2
+            val country = java.util.Locale("", code).getDisplayCountry(java.util.Locale.ENGLISH).lowercase()
+            out.add(Pair(e, "flag " + country + " " + code.lowercase()))
+        }
+        return out
+    }
+
+    private fun defaultEmojis(): List<String> {
+        val out = LinkedHashSet<String>()
+        out.addAll(loadRecent())
+        out.addAll(popularEmoji)
+        return out.take(14)
+    }
+
+    private fun searchResults(q: String): List<String> {
+        val query = q.trim()
+        if (query.isEmpty()) return defaultEmojis()
+        val idx = searchIndex ?: buildSearchIndex().also { searchIndex = it }
+        val toks = query.lowercase().split(" ").filter { it.isNotEmpty() }
+        val out = ArrayList<String>()
+        for ((e, txt) in idx) {
+            val words = txt.split(' ', '-')
+            if (toks.all { t -> words.any { w -> w.startsWith(t) } }) {
+                out.add(e)
+                if (out.size >= 14) break
+            }
+        }
+        return out
+    }
+
     // ================= Colors and sizes =================
     private fun bgColor() = if (dark) 0xFF1B1B1B.toInt() else 0xFFDADADA.toInt()
     private fun barColor() = if (dark) 0xFF262626.toInt() else 0xFFD0D0D0.toInt()
@@ -931,6 +1109,7 @@ class KeyboardService : InputMethodService() {
             selecting = false
             barMode = 0
             barManual = false
+            searchQ.setLength(0)
             render()
             host.animate().cancel()
             if (restarting) {
@@ -975,6 +1154,9 @@ class KeyboardService : InputMethodService() {
         sugBox = null
         leftIcon = null
         spaceKey = null
+        searchCard = null
+        searchTv = null
+        searchClear = null
         if (panel != 2) {
             menuClip = null
             confirmAll = false
@@ -988,6 +1170,7 @@ class KeyboardService : InputMethodService() {
             3 -> { root.addView(toolbarRow()); renderTextEdit(); return }
             4 -> { root.addView(toolbarRow()); renderSettings(); return }
             5 -> { root.addView(toolbarRow()); renderMore(); return }
+            6 -> { renderSearch(); return }
         }
         root.addView(toolbarRow())
         when {
@@ -1098,6 +1281,14 @@ class KeyboardService : InputMethodService() {
         }
         scroll.addView(col)
         root.addView(scroll)
+        val slide = emojiSlide
+        emojiSlide = 0
+        if (slide != 0) {
+            scroll.translationX = slide * dp(70).toFloat()
+            scroll.alpha = 0.2f
+            scroll.animate().translationX(0f).alpha(1f).setDuration(150)
+                .setInterpolator(DecelerateInterpolator()).start()
+        }
         root.addView(emojiBar())
     }
 
@@ -1105,7 +1296,18 @@ class KeyboardService : InputMethodService() {
         val v = IconView(kind)
         v.tint = if (sel) 0xFF2F7CF6.toInt() else 0
         v.cutColor = barColor()
-        v.background = bg(0)
+        if (sel && emojiRipple) {
+            val d = GradientDrawable()
+            d.shape = GradientDrawable.OVAL
+            d.setColor(0x55707070)
+            v.background = d
+            val anim = ValueAnimator.ofInt(255, 0)
+            anim.duration = 420
+            anim.addUpdateListener { d.alpha = it.animatedValue as Int }
+            anim.start()
+        } else {
+            v.background = ovalBg()
+        }
         v.layoutParams = LinearLayout.LayoutParams(dp(w), dp(46))
         v.setOnClickListener {
             feedback(it)
@@ -1121,10 +1323,11 @@ class KeyboardService : InputMethodService() {
             layoutParams = LinearLayout.LayoutParams(MP, dp(46))
             setBackgroundColor(barColor())
         }
-        bar.addView(emojiBarIcon(19, false, 50) {
+        bar.addView(emojiBarIcon(19, false, 46) {
             panel = 0
             render()
         })
+        bar.addView(emojiBarIcon(21, false, 40) { enterSearch() })
         bar.addView(View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(1), dp(22))
             setBackgroundColor(0x55888888)
@@ -1141,10 +1344,13 @@ class KeyboardService : InputMethodService() {
         val kinds = listOf(10, 1, 11, 12, 13, 14, 15, 16, 17, 18)
         for ((i, k) in kinds.withIndex()) {
             inner.addView(emojiBarIcon(k, i == emojiCat, 44) {
+                emojiSlide = if (i > emojiCat) 1 else if (i < emojiCat) -1 else 0
+                emojiRipple = true
                 emojiCat = i
                 render()
             })
         }
+        emojiRipple = false
         hs.addView(inner)
         bar.addView(hs)
         val bk = key("⌫", 1f, flat = true, repeat = true) { backspace() }
@@ -1177,6 +1383,153 @@ class KeyboardService : InputMethodService() {
         getSharedPreferences("kb", MODE_PRIVATE).edit()
             .putString("recent", list.take(32).joinToString(" "))
             .apply()
+    }
+
+    // ---------- Emoji search ----------
+    private fun enterSearch() {
+        searchQ.setLength(0)
+        val switched = lang != 0
+        lang = 0
+        mode = 0
+        shift = false
+        caps = false
+        if (searchIndex == null) searchIndex = buildSearchIndex()
+        panel = 6
+        render()
+        if (switched) {
+            showToast("Keyboard automatically changed to a language that supports emoji searches.")
+        }
+    }
+
+    private fun exitSearch() {
+        searchQ.setLength(0)
+        panel = 1
+        render()
+    }
+
+    private fun renderSearch() {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = popupBg(14)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            layoutParams = LinearLayout.LayoutParams(MP, dp(112)).apply {
+                setMargins(dp(2), dp(2), dp(2), dp(6))
+            }
+        }
+        searchCard = card
+        root.addView(card)
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(fnBg())
+            }
+            layoutParams = LinearLayout.LayoutParams(MP, dp(44)).apply {
+                setMargins(dp(2), 0, dp(2), dp(6))
+            }
+        }
+        val back = IconView(22)
+        back.layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+        back.setOnClickListener {
+            feedback(it)
+            exitSearch()
+        }
+        bar.addView(back)
+        val tv = TextView(this).apply {
+            textSize = 16f
+            setTextColor(textCol())
+            maxLines = 1
+            layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
+        }
+        searchTv = tv
+        bar.addView(tv)
+        val clear = TextView(this).apply {
+            text = "✕"
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setTextColor(textCol())
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setOnClickListener {
+                feedback(it)
+                searchQ.setLength(0)
+                updateSearchUi()
+            }
+        }
+        searchClear = clear
+        bar.addView(clear)
+        root.addView(bar)
+
+        if (mode != 0) renderSymbols() else renderEnglish()
+        root.addView(bottomRow())
+        updateSearchUi()
+    }
+
+    private fun searchText(): CharSequence {
+        val q = searchQ.toString()
+        if (q.isEmpty()) {
+            val s = SpannableString("|Search emojis")
+            s.setSpan(ForegroundColorSpan(0xFF2F7CF6.toInt()), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            s.setSpan(ForegroundColorSpan(0xFF8A8A8A.toInt()), 1, s.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            return s
+        }
+        val s = SpannableString(q + "|")
+        s.setSpan(ForegroundColorSpan(0xFF2F7CF6.toInt()), q.length, s.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return s
+    }
+
+    private fun updateSearchUi() {
+        val card = searchCard ?: return
+        card.removeAllViews()
+        val res = searchResults(searchQ.toString())
+        if (res.isEmpty()) {
+            card.addView(TextView(this).apply {
+                text = "No emojis found"
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(0xFF8A8A8A.toInt())
+            })
+        } else {
+            for (chunk in res.chunked(7)) {
+                val line = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = LinearLayout.LayoutParams(MP, WC)
+                }
+                for (e in chunk) line.addView(searchCell(e))
+                repeat(7 - chunk.size) { line.addView(spacer(1f, 46)) }
+                card.addView(line)
+            }
+        }
+        searchTv?.text = searchText()
+        searchClear?.visibility = if (searchQ.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun searchCell(e: String) = TextView(this).apply {
+        text = e
+        textSize = 26f
+        gravity = Gravity.CENTER
+        layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
+        setOnClickListener {
+            feedback(it)
+            currentInputConnection?.commitText(e, 1)
+            addRecent(e)
+        }
+    }
+
+    private fun searchType(s: String) {
+        if (s == " ") {
+            if (searchQ.isNotEmpty() && searchQ[searchQ.length - 1] != ' ') searchQ.append(' ')
+        } else if (searchQ.length < 40) {
+            searchQ.append(s.lowercase())
+        }
+        if (shift && !caps) {
+            shift = false
+            render()
+        } else {
+            updateSearchUi()
+        }
     }
 
     // ---------- Clipboard ----------
@@ -1692,11 +2045,16 @@ class KeyboardService : InputMethodService() {
         spaceKey = sk
         line.addView(sk)
         line.addView(key(if (lang == 0) "." else "।", preview = true) { type(if (lang == 0) "." else "।") })
-        line.addView(key("↵", 1.5f, fn = true) { enter() })
+        if (panel == 6) {
+            line.addView(fnIcon(21, 1.5f) { })
+        } else {
+            line.addView(key("↵", 1.5f, fn = true) { enter() })
+        }
         return line
     }
 
     private fun toggleLang() {
+        if (panel == 6) return
         lang = if (lang == 0) 1 else 0
         mode = 0
         shift = false
@@ -1740,6 +2098,10 @@ class KeyboardService : InputMethodService() {
         s.isNotEmpty() && !(s[0].isLetter() || s[0] in '\u0980'..'\u09FF')
 
     private fun type(s: String) {
+        if (panel == 6) {
+            searchType(s)
+            return
+        }
         val ic = currentInputConnection ?: return
         if (isBoundary(s)) learnCurrent()
         ic.commitText(s, 1)
@@ -1754,6 +2116,11 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun backspace() {
+        if (panel == 6) {
+            if (searchQ.isNotEmpty()) searchQ.setLength(searchQ.length - 1)
+            updateSearchUi()
+            return
+        }
         sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
         refreshSuggestions()
     }
@@ -1857,7 +2224,7 @@ class KeyboardService : InputMethodService() {
                         if (far && !swiped) {
                             swiped = true
                             dir = if (e.x > downX) 1 else -1
-                            showLangPopup(v, dir, langName(1 - lang))
+                            if (panel != 6) showLangPopup(v, dir, langName(1 - lang))
                         } else if (!far && swiped) {
                             swiped = false
                             hideLangPopup()
@@ -1869,7 +2236,7 @@ class KeyboardService : InputMethodService() {
                             hideLangPopup()
                             feedback(v)
                             onSwipe(dir)
-                            flashLangPopup()
+                            if (panel != 6) flashLangPopup()
                         } else {
                             feedback(v)
                             onTap()
