@@ -45,7 +45,8 @@ class KeyboardService : InputMethodService() {
     private var panel = 0 // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more
     private var emojiCat = 1
     private var selecting = false
-    private var barMode = 0 // 0 = auto, 1 = tools, 2 = suggestions
+    private var barMode = 0 // 0 = auto (tools), 1 = tools, 2 = suggestions
+    private var barManual = false
     private var lastShowSug = false
     private var barFresh = true
 
@@ -63,13 +64,22 @@ class KeyboardService : InputMethodService() {
     private lateinit var root: LinearLayout
     private var sugBox: LinearLayout? = null
     private var leftIcon: IconView? = null
+    private var spaceKey: View? = null
     private var previewView: TextView? = null
     private var langPopup: TextView? = null
     private val uiHandler = Handler(Looper.getMainLooper())
     private val hidePreviewRunnable = Runnable { previewView?.visibility = View.GONE }
+    private val hideLangRunnable = Runnable {
+        val lp = langPopup
+        if (lp != null) {
+            lp.animate().alpha(0f).setDuration(150).withEndAction { lp.visibility = View.GONE }.start()
+        }
+    }
     private val emojiCache = HashMap<Int, List<String>>()
     private val learned = HashMap<String, Int>()
     private var learnedLoaded = false
+    private val bigrams = HashMap<String, Int>()
+    private var bigramsLoaded = false
 
     private class Clip(var text: String, var locked: Boolean, val time: Long)
 
@@ -407,11 +417,14 @@ class KeyboardService : InputMethodService() {
 
     private fun hidePreview() {
         uiHandler.removeCallbacks(hidePreviewRunnable)
-        uiHandler.postDelayed(hidePreviewRunnable, 70)
+        uiHandler.postDelayed(hidePreviewRunnable, 90)
     }
 
-    private fun showLangPopup(anchor: View, dir: Int) {
+    private fun langName(l: Int) = if (l == 1) "বাংলা" else "English (US)"
+
+    private fun showLangPopup(anchor: View, dir: Int, label: String) {
         if (!::host.isInitialized) return
+        uiHandler.removeCallbacks(hideLangRunnable)
         var lp = langPopup
         if (lp == null) {
             lp = TextView(this)
@@ -428,19 +441,33 @@ class KeyboardService : InputMethodService() {
         if (x > host.width - w) x = host.width - w
         if (x < 0) x = 0
         val y = maxOf(pos[1] - h - dp(2), 0)
+        lp.animate().cancel()
         lp.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.TOP or Gravity.START)
         lp.translationX = x.toFloat() + dir * dp(30)
         lp.translationY = y.toFloat()
         lp.background = popupBg(14)
         lp.setTextColor(textCol())
-        lp.text = "◂   " + (if (lang == 0) "বাংলা" else "English (US)") + "   ▸"
+        lp.text = "◂   " + label + "   ▸"
         lp.alpha = 0f
         lp.visibility = View.VISIBLE
         lp.animate().alpha(1f).translationX(x.toFloat()).setDuration(130).start()
     }
 
     private fun hideLangPopup() {
+        uiHandler.removeCallbacks(hideLangRunnable)
+        langPopup?.animate()?.cancel()
         langPopup?.visibility = View.GONE
+    }
+
+    private fun flashLangPopup() {
+        uiHandler.postDelayed({
+            val sp = spaceKey
+            if (sp != null && sp.width > 0) {
+                showLangPopup(sp, 0, langName(lang))
+                uiHandler.removeCallbacks(hideLangRunnable)
+                uiHandler.postDelayed(hideLangRunnable, 650)
+            }
+        }, 70)
     }
 
     // ================= Suggestions =================
@@ -487,6 +514,42 @@ class KeyboardService : InputMethodService() {
             .apply()
     }
 
+    private fun loadBigrams() {
+        if (bigramsLoaded) return
+        bigramsLoaded = true
+        val s = getSharedPreferences("kb", MODE_PRIVATE).getString("bigrams", "") ?: ""
+        for (line in s.split("\n")) {
+            val i = line.lastIndexOf(':')
+            if (i > 0) bigrams[line.substring(0, i)] = line.substring(i + 1).toIntOrNull() ?: 1
+        }
+    }
+
+    private fun learnBigram(prev: String, next: String) {
+        if (isPassword() || prev.isEmpty() || next.isEmpty()) return
+        loadBigrams()
+        val k = prev.lowercase() + " " + next.lowercase()
+        bigrams[k] = (bigrams[k] ?: 0) + 1
+        if (bigrams.size > 800) {
+            val keep = bigrams.entries.sortedByDescending { it.value }.take(500)
+            bigrams.clear()
+            for (e in keep) bigrams[e.key] = e.value
+        }
+        getSharedPreferences("kb", MODE_PRIVATE).edit()
+            .putString("bigrams", bigrams.entries.joinToString("\n") { it.key + ":" + it.value })
+            .apply()
+    }
+
+    private fun nextWords(prev: String): List<String> {
+        if (prev.isEmpty()) return emptyList()
+        loadBigrams()
+        val pre = prev.lowercase() + " "
+        return bigrams.entries
+            .filter { it.key.startsWith(pre) }
+            .sortedByDescending { it.value }
+            .map { it.key.substring(pre.length) }
+            .take(3)
+    }
+
     private fun currentWord(): String {
         val before = currentInputConnection?.getTextBeforeCursor(30, 0) ?: return ""
         var i = before.length
@@ -494,9 +557,30 @@ class KeyboardService : InputMethodService() {
         return before.substring(i)
     }
 
+    private fun previousWord(): String {
+        val before = currentInputConnection?.getTextBeforeCursor(60, 0) ?: return ""
+        var i = before.length
+        while (i > 0 && isWordChar(before[i - 1])) i--
+        var j = i
+        while (j > 0 && before[j - 1] == ' ') j--
+        if (j == i) return ""
+        var k = j
+        while (k > 0 && isWordChar(before[k - 1])) k--
+        return before.substring(k, j)
+    }
+
     private fun learnCurrent() {
         val w = currentWord()
+        if (w.isEmpty()) return
         if (w.length >= 2) learn(w)
+        learnBigram(previousWord(), w)
+    }
+
+    private fun fieldEmpty(): Boolean {
+        val ic = currentInputConnection ?: return true
+        val b = ic.getTextBeforeCursor(1, 0)
+        val a = ic.getTextAfterCursor(1, 0)
+        return (b == null || b.isEmpty()) && (a == null || a.isEmpty())
     }
 
     private fun matches(p: String): List<String> {
@@ -513,27 +597,24 @@ class KeyboardService : InputMethodService() {
         return out.map { if (cap) it.replaceFirstChar { c -> c.uppercase() } else it }
     }
 
+    private fun starters(): List<String> =
+        if (lang == 1) listOf("আমি", "তুমি", "কেমন") else listOf("I", "The", "Hi")
+
     private fun candidates(): List<String> {
         if (isPassword()) return emptyList()
         val w = currentWord()
-        if (w.isEmpty()) return emptyList()
+        if (w.isEmpty()) {
+            val n = nextWords(previousWord())
+            return if (n.isNotEmpty()) n else starters()
+        }
         return matches(w).take(3)
-    }
-
-    private fun starters(): List<String> {
-        if (isPassword() || currentWord().isNotEmpty()) return emptyList()
-        return if (lang == 1) listOf("আমি", "তুমি", "কেমন") else listOf("I", "The", "Hi")
     }
 
     private fun refreshSuggestions() {
         val box = sugBox ?: return
-        val cands = if (panel != 0 || !suggestOn) emptyList() else candidates()
-        val showSug = panel == 0 && suggestOn && when (barMode) {
-            1 -> false
-            2 -> true
-            else -> cands.isNotEmpty()
-        }
-        val list = if (!showSug) emptyList() else if (cands.isNotEmpty()) cands else starters()
+        if (barMode == 2 && !barManual && panel == 0 && fieldEmpty()) barMode = 0
+        val showSug = panel == 0 && suggestOn && barMode == 2
+        val list = if (showSug) candidates() else emptyList()
         box.removeAllViews()
         if (!showSug) {
             box.addView(iconKey(1) {
@@ -605,6 +686,7 @@ class KeyboardService : InputMethodService() {
         box.animate().cancel()
         box.animate().alpha(0f).setDuration(130).withEndAction {
             barMode = if (showingSug) 1 else 2
+            barManual = true
             refreshSuggestions()
             box.animate().alpha(1f).setDuration(180).start()
         }.start()
@@ -612,10 +694,12 @@ class KeyboardService : InputMethodService() {
 
     private fun pick(s: String) {
         val ic = currentInputConnection ?: return
+        val prev = previousWord()
         val w = currentWord()
         ic.deleteSurroundingText(w.length, 0)
         ic.commitText(s + " ", 1)
         learn(s)
+        learnBigram(prev, s)
         refreshSuggestions()
     }
 
@@ -846,6 +930,7 @@ class KeyboardService : InputMethodService() {
             panel = 0
             selecting = false
             barMode = 0
+            barManual = false
             render()
             host.animate().cancel()
             if (restarting) {
@@ -879,7 +964,7 @@ class KeyboardService : InputMethodService() {
                 Configuration.UI_MODE_NIGHT_YES
         }
         previewView?.visibility = View.GONE
-        langPopup?.visibility = View.GONE
+        hideLangPopup()
         val side = if (oneHand == 0) 0 else (resources.displayMetrics.widthPixels * 0.22f).toInt()
         root.setPadding(
             dp(4) + (if (oneHand == 2) side else 0), dp(6),
@@ -889,6 +974,7 @@ class KeyboardService : InputMethodService() {
         root.removeAllViews()
         sugBox = null
         leftIcon = null
+        spaceKey = null
         if (panel != 2) {
             menuClip = null
             confirmAll = false
@@ -1510,7 +1596,9 @@ class KeyboardService : InputMethodService() {
         reset.addView(key("Clear learned words", 1f, fn = true, hDp = 38, sp = 13f) {
             learned.clear()
             learnedLoaded = true
-            getSharedPreferences("kb", MODE_PRIVATE).edit().remove("words").apply()
+            bigrams.clear()
+            bigramsLoaded = true
+            getSharedPreferences("kb", MODE_PRIVATE).edit().remove("words").remove("bigrams").apply()
             render()
         })
         reset.addView(key("Clear clipboard", 1f, fn = true, hDp = 38, sp = 13f) {
@@ -1599,8 +1687,10 @@ class KeyboardService : InputMethodService() {
             })
         }
         line.addView(key(",", preview = true) { type(",") })
-        val spaceLabel = if (lang == 1) "◂  বাংলা  ▸" else "◂  English (US)  ▸"
-        line.addView(key(spaceLabel, 5f, onSwipe = { toggleLang() }) { type(" ") })
+        val spaceLabel = "◂  " + langName(lang) + "  ▸"
+        val sk = key(spaceLabel, 5f, onSwipe = { toggleLang() }) { type(" ") }
+        spaceKey = sk
+        line.addView(sk)
         line.addView(key(if (lang == 0) "." else "।", preview = true) { type(if (lang == 0) "." else "।") })
         line.addView(key("↵", 1.5f, fn = true) { enter() })
         return line
@@ -1611,7 +1701,6 @@ class KeyboardService : InputMethodService() {
         mode = 0
         shift = false
         caps = false
-        barMode = 0
         render()
     }
 
@@ -1654,7 +1743,8 @@ class KeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         if (isBoundary(s)) learnCurrent()
         ic.commitText(s, 1)
-        barMode = 0
+        barMode = 2
+        barManual = false
         if (shift && !caps) {
             shift = false
             render()
@@ -1763,11 +1853,11 @@ class KeyboardService : InputMethodService() {
                         v.isPressed = true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        val far = Math.abs(e.x - downX) > dp(40)
+                        val far = Math.abs(e.x - downX) > dp(14)
                         if (far && !swiped) {
                             swiped = true
                             dir = if (e.x > downX) 1 else -1
-                            showLangPopup(v, dir)
+                            showLangPopup(v, dir, langName(1 - lang))
                         } else if (!far && swiped) {
                             swiped = false
                             hideLangPopup()
@@ -1779,6 +1869,7 @@ class KeyboardService : InputMethodService() {
                             hideLangPopup()
                             feedback(v)
                             onSwipe(dir)
+                            flashLangPopup()
                         } else {
                             feedback(v)
                             onTap()
