@@ -57,6 +57,7 @@ class KeyboardService : InputMethodService() {
     private var barManual = false
     private var lastShowSug = false
     private var barFresh = true
+    private var panelSug: List<String> = emptyList()
 
     private var themeMode = 0
     private var heightSet = 1
@@ -779,23 +780,30 @@ class KeyboardService : InputMethodService() {
     private fun refreshSuggestions() {
         val box = sugBox ?: return
         if (barMode == 2 && !barManual && panel == 0 && fieldEmpty()) barMode = 0
-        val showSug = panel == 0 && suggestOn && barMode == 2
-        val list = if (showSug) candidates() else emptyList()
+        val inPanel = panel != 0
+        val showSug = if (inPanel) barMode == 2 else (suggestOn && barMode == 2)
+        if (inPanel && panelSug.isEmpty()) panelSug = defaultEmojis().take(7)
         box.removeAllViews()
         if (!showSug) {
-            box.addView(iconKey(1) {
-                panel = if (panel == 1) 0 else 1
-                render()
-            })
-            box.addView(iconKey(3) {
-                panel = if (panel == 3) 0 else 3
-                render()
-            })
-            box.addView(iconKey(2) {
-                panel = if (panel == 2) 0 else 2
-                render()
-            })
+            box.addView(iconKey(1) { openPanel(1) })
+            box.addView(iconKey(3) { openPanel(3) })
+            box.addView(iconKey(2) { openPanel(2) })
+        } else if (inPanel) {
+            for (e in panelSug) {
+                box.addView(TextView(this).apply {
+                    text = e
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                    setOnClickListener {
+                        feedback(it)
+                        currentInputConnection?.commitText(e, 1)
+                        addRecent(e)
+                    }
+                })
+            }
         } else {
+            val list = candidates()
             for ((i, s) in list.withIndex()) {
                 if (i > 0) {
                     box.addView(View(this).apply {
@@ -831,12 +839,8 @@ class KeyboardService : InputMethodService() {
         }
     }
 
+    // T button: only flips the top bar (tools <-> suggestions). Open panels stay open.
     private fun onBarToggle() {
-        if (panel != 0) {
-            panel = 0
-            render()
-            return
-        }
         val icon = leftIcon ?: return
         val box = sugBox ?: return
         val showingSug = lastShowSug
@@ -856,6 +860,25 @@ class KeyboardService : InputMethodService() {
             refreshSuggestions()
             box.animate().alpha(1f).setDuration(180).start()
         }.start()
+    }
+
+    private fun openPanel(p: Int) {
+        if (panel == p) {
+            closePanel()
+        } else {
+            panel = p
+            barMode = 2
+            barManual = true
+            panelSug = defaultEmojis().take(7)
+            render()
+        }
+    }
+
+    private fun closePanel() {
+        panel = 0
+        barMode = 0
+        barManual = false
+        render()
     }
 
     private fun pick(s: String) {
@@ -1284,10 +1307,7 @@ class KeyboardService : InputMethodService() {
         }
         sugBox = box
         line.addView(box)
-        line.addView(iconKey(4, 1f) {
-            panel = if (panel == 5) 0 else 5
-            render()
-        })
+        line.addView(iconKey(4, 1f) { openPanel(5) })
         barFresh = true
         refreshSuggestions()
         return line
@@ -1312,10 +1332,7 @@ class KeyboardService : InputMethodService() {
         })
         val chev = IconView(5)
         chev.layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
-        chev.setOnClickListener {
-            panel = 0
-            render()
-        }
+        chev.setOnClickListener { closePanel() }
         head.addView(chev)
         head.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
         if (rightLabel != null) {
@@ -1400,10 +1417,7 @@ class KeyboardService : InputMethodService() {
             layoutParams = LinearLayout.LayoutParams(MP, dp(46))
             setBackgroundColor(barColor())
         }
-        bar.addView(emojiBarIcon(19, false, 46) {
-            panel = 0
-            render()
-        })
+        bar.addView(emojiBarIcon(19, false, 46) { closePanel() })
         bar.addView(emojiBarIcon(21, false, 40) { enterSearch() })
         bar.addView(View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(1), dp(22))
@@ -1481,6 +1495,8 @@ class KeyboardService : InputMethodService() {
     private fun exitSearch() {
         searchQ.setLength(0)
         panel = 1
+        barMode = 2
+        barManual = true
         render()
     }
 
@@ -1850,9 +1866,8 @@ class KeyboardService : InputMethodService() {
         top.addView(key("Select all", 4f, fn = true, sp = 15f) { menuAction(android.R.id.selectAll) })
         top.addView(key("⇥", 1f, fn = true) { sendArrow(KeyEvent.KEYCODE_MOVE_END) })
         top.addView(key("✕", 1.5f, flat = true) {
-            panel = 0
             selecting = false
-            render()
+            closePanel()
         })
         root.addView(top)
 
