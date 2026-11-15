@@ -777,18 +777,21 @@ class KeyboardService : InputMethodService() {
         return matches(w).take(3)
     }
 
+    // Top bar rule:
+    //  - keyboard: tools when the field is empty, word suggestions once you type
+    //  - panels (emoji, clipboard, text editing...): tools stay until you tap T;
+    //    after T: emoji panel -> emoji suggestions, other panels -> word suggestions
     private fun refreshSuggestions() {
         val box = sugBox ?: return
         if (barMode == 2 && !barManual && panel == 0 && fieldEmpty()) barMode = 0
-        val inPanel = panel != 0
-        val showSug = if (inPanel) barMode == 2 else (suggestOn && barMode == 2)
-        if (inPanel && panelSug.isEmpty()) panelSug = defaultEmojis().take(7)
+        val showSug = if (panel != 0) barMode == 2 else (suggestOn && barMode == 2)
+        if (panel == 1 && panelSug.isEmpty()) panelSug = defaultEmojis().take(7)
         box.removeAllViews()
         if (!showSug) {
             box.addView(iconKey(1) { openPanel(1) })
             box.addView(iconKey(3) { openPanel(3) })
             box.addView(iconKey(2) { openPanel(2) })
-        } else if (inPanel) {
+        } else if (panel == 1) {
             for (e in panelSug) {
                 box.addView(TextView(this).apply {
                     text = e
@@ -803,7 +806,7 @@ class KeyboardService : InputMethodService() {
                 })
             }
         } else {
-            val list = candidates()
+            val list = if (suggestOn) candidates() else emptyList()
             for ((i, s) in list.withIndex()) {
                 if (i > 0) {
                     box.addView(View(this).apply {
@@ -862,12 +865,13 @@ class KeyboardService : InputMethodService() {
         }.start()
     }
 
+    // Opening a panel keeps the tools row visible (barMode = 1) until you tap T.
     private fun openPanel(p: Int) {
         if (panel == p) {
             closePanel()
         } else {
             panel = p
-            barMode = 2
+            barMode = 1
             barManual = true
             panelSug = defaultEmojis().take(7)
             render()
@@ -1495,7 +1499,7 @@ class KeyboardService : InputMethodService() {
     private fun exitSearch() {
         searchQ.setLength(0)
         panel = 1
-        barMode = 2
+        barMode = 1
         barManual = true
         render()
     }
