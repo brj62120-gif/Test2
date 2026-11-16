@@ -1,5 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application android:label="My Keyboard">
+    <application
+        android:label="My Keyboard"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher_round">
         <service
             android:name=".KeyboardService"
             android:label="My Keyboard"
@@ -14,5 +17,3 @@
         </service>
     </application>
 </manifest>
-android:icon="@drawable/ic_launcher"
-android:roundIcon="@drawable/ic_launcher_round"
