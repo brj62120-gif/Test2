@@ -29,27 +29,30 @@ import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 
 class KeyboardService : InputMethodService() {
     private val MP = LinearLayout.LayoutParams.MATCH_PARENT
     private val WC = LinearLayout.LayoutParams.WRAP_CONTENT
 
-    private var lang = 0 // 0 = English, 1 = বাংলা (Samsung)
+    private var lang = 0 // 0 = English, 1 = বাংলা (Samsung layout অথবা Avro)
     private var shift = false
     private var caps = false
+    private var shiftManual = false // ইউজার নিজে shift চাপলে auto-capitalization থেমে থাকে
     private var lastShiftTap = 0L
     private var mode = 0 // 0 = অক্ষর, 1 = symbol 1/2, 2 = symbol 2/2
     private var bnPage = 0
     private var bnCtx = false // true = ব্যঞ্জনের পর, কার দেখানো হচ্ছে
     private var backHeld = false // ব্যাকস্পেস চেপে ধরা থাকলে লেআউট আঁকা বন্ধ রাখা হয়
     private var dark = false
-    // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more, 6 = emoji search
+    // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more, 6 = emoji search, 7 = modes
     private var panel = 0
     private var emojiCat = 1
     private var emojiSlide = 0
@@ -60,15 +63,21 @@ class KeyboardService : InputMethodService() {
     private var lastShowSug = false
     private var barFresh = true
     private var panelSug: List<String> = emptyList()
+    private var sugExpanded = false // suggestion bar এর "..." চাপলে বড় suggestion + Auto replace প্যানেল
 
     private var themeMode = 0
     private var heightSet = 1
     private var haptic = true
     private var sound = false
     private var suggestOn = true
-    private var oneHand = 0
+    private var kbMode = 0 // 0 = Standard, 1 = Left hand, 2 = Right hand, 3 = Split, 4 = Compact
     private var clipOn = true
     private var clipExpire = 0 // 0 = never, 1 = 1 day, 2 = 7 days, 3 = 30 days
+    private var autoReplace = false
+    private var autoCap = true
+    private var previewOn = true
+    private var translit = false // true = বাংলা মানে Avro phonetic (QWERTY দিয়ে)
+    private var avroDigits = true
 
     private lateinit var host: FrameLayout
     private lateinit var overlay: FrameLayout
@@ -120,6 +129,29 @@ class KeyboardService : InputMethodService() {
     private var selMode = false
     private val selected = HashSet<Clip>()
     private var confirmAll = false
+
+    // ---- Avro composing state ----
+    private val avroBuf = StringBuilder()
+    private var lastAvroTime = 0L
+
+    // ---- Toolbar items (Samsung style: Touch and hold to reorder) ----
+    private class Tool(val id: String, val kind: Int, val label: String)
+
+    private val allTools = listOf(
+        Tool("emoji", 1, "Emoji"),
+        Tool("edit", 3, "Text editing"),
+        Tool("clip", 2, "Clipboard"),
+        Tool("modes", 19, "Modes"),
+        Tool("settings", 31, "Settings"),
+        Tool("translit", 32, "Transliterate")
+    )
+    private var tbBar = mutableListOf("emoji", "edit", "clip") // top bar এ যা দেখাবে
+    private var tbPanel = mutableListOf("modes", "settings", "translit") // "..." প্যানেলে যা থাকবে
+    private val maxBarTools = 6
+    private var moreArea: LinearLayout? = null
+    private val moreTiles = ArrayList<Pair<View, String>>()
+    private var ghost: IconView? = null
+    private var dragSrc: View? = null
 
     private val enRows = listOf(
         "1 2 3 4 5 6 7 8 9 0",
@@ -385,6 +417,42 @@ class KeyboardService : InputMethodService() {
                     path.lineTo(cx + 3f * u, cy + 7f * u)
                     canvas.drawPath(path, p)
                 }
+                31 -> { // gear (Settings)
+                    p.style = Paint.Style.STROKE
+                    p.strokeCap = Paint.Cap.ROUND
+                    p.strokeWidth = 2.8f * u
+                    canvas.drawCircle(cx, cy, 6.2f * u, p)
+                    p.strokeWidth = 3.4f * u
+                    for (a in 0 until 8) {
+                        val ang = a * Math.PI / 4
+                        val dx = Math.cos(ang).toFloat()
+                        val dy = Math.sin(ang).toFloat()
+                        canvas.drawLine(
+                            cx + dx * 9f * u, cy + dy * 9f * u,
+                            cx + dx * 10.5f * u, cy + dy * 10.5f * u, p
+                        )
+                    }
+                }
+                32 -> { // transliterate: two tiles "অ" and "A"
+                    canvas.drawRoundRect(
+                        RectF(cx - 11f * u, cy - 11f * u, cx + 3f * u, cy + 3f * u),
+                        2f * u, 2f * u, p
+                    )
+                    q.style = Paint.Style.FILL
+                    canvas.drawRoundRect(
+                        RectF(cx - 4.5f * u, cy - 4.5f * u, cx + 12.5f * u, cy + 12.5f * u),
+                        3f * u, 3f * u, q
+                    )
+                    canvas.drawRoundRect(
+                        RectF(cx - 3f * u, cy - 3f * u, cx + 11f * u, cy + 11f * u),
+                        2f * u, 2f * u, p
+                    )
+                    q.textAlign = Paint.Align.CENTER
+                    q.isFakeBoldText = true
+                    q.textSize = 9f * u
+                    canvas.drawText("অ", cx - 4f * u, cy - 0.5f * u, q)
+                    canvas.drawText("A", cx + 4f * u, cy + 7.5f * u, q)
+                }
                 else -> { // chevron down
                     p.style = Paint.Style.STROKE
                     p.strokeWidth = 2.4f * u
@@ -403,19 +471,6 @@ class KeyboardService : InputMethodService() {
     private fun feedback(v: View) {
         if (haptic) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         if (sound) v.playSoundEffect(SoundEffectConstants.CLICK)
-    }
-
-    private fun iconKey(kind: Int, weight: Float = 1f, onTap: () -> Unit): View {
-        val v = IconView(kind)
-        v.background = bg(0)
-        v.layoutParams = LinearLayout.LayoutParams(0, dp(40), weight).apply {
-            setMargins(dp(2), dp(3), dp(2), dp(3))
-        }
-        v.setOnClickListener {
-            feedback(it)
-            onTap()
-        }
-        return v
     }
 
     private fun fnIcon(kind: Int, weight: Float, onTap: () -> Unit): View {
@@ -526,7 +581,7 @@ class KeyboardService : InputMethodService() {
                 curKeyFor[v] = v
                 v.isPressed = true
                 val info = infoOf(v)
-                if (info != null) showPreview(v, info.label)
+                if (info != null && previewOn) showPreview(v, info.label)
             }
             MotionEvent.ACTION_MOVE -> {
                 val cur = curKeyFor[v]
@@ -536,7 +591,7 @@ class KeyboardService : InputMethodService() {
                     under.isPressed = true
                     curKeyFor[v] = under
                     val info = infoOf(under)
-                    if (info != null) showPreview(under, info.label)
+                    if (info != null && previewOn) showPreview(under, info.label)
                 }
             }
             MotionEvent.ACTION_UP -> {
@@ -559,7 +614,8 @@ class KeyboardService : InputMethodService() {
         }
     }
 
-    private fun langName(l: Int) = if (l == 1) "বাংলা" else "English (US)"
+    private fun langName(l: Int) =
+        if (l == 1) (if (translit) "বাংলা (Avro)" else "বাংলা") else "English (US)"
 
     private fun showLangPopup(anchor: View, dir: Int, label: String) {
         if (!::host.isInitialized) return
@@ -639,20 +695,25 @@ class KeyboardService : InputMethodService() {
         uiHandler.postDelayed(hideToastRunnable, 2600)
     }
 
-    // ================= Suggestions =================
+    // ================= Dictionary & Suggestions =================
     private val enWords = "the be to of and a in that have it for not on with he as you do at this but his by from they we say her she or an will my one all would there their what so up out if about who get which go me when make can like time no just him know take people into year your good some could them see other than then now look only come its over think also back after use two how our work first well way even new want because any these give day most us is are was were been has had did does am hello hi thanks thank please sorry okay yes where why tomorrow today tonight morning night friend family home love happy birthday welcome great nice really very much more still should going doing coming working message phone call tell send share meeting office school food water money problem question answer help need understand remember forget something anything everything nothing someone everyone yesterday thinking wonderful important different information beautiful together possible between another without through before always never maybe probably however actually definitely especially awesome congratulations assalamualaikum inshallah alhamdulillah mashallah bangladesh dhaka internet facebook whatsapp youtube google"
     private val bnWords = "আমি তুমি আপনি সে আমরা তোমরা তারা এই ওই কি কী কেন কোথায় কখন কেমন কত কে কাকে না হ্যাঁ ভালো খারাপ আছি আছো আছেন আছে করছি করছো করছেন করে করা করব করবো হবে হয় হয়েছে হচ্ছে যাব যাবো যাচ্ছি আসব আসবো আসছি বলো বলছি বলুন ধন্যবাদ দুঃখিত অনেক একটু এখন তখন আজ কাল আগামীকাল গতকাল সকাল দুপুর বিকাল সন্ধ্যা রাত বন্ধু ভাই বোন মা বাবা বাড়ি স্কুল কলেজ অফিস কাজ টাকা খাবার পানি ভাত চা সালাম শুভ জন্মদিন শুভেচ্ছা স্বাগতম ঠিক থাকো থাকি দেখা তাহলে কিন্তু এবং অথবা যদি তবে তাই কারণ সবাই সব কিছু কোনো একটা একটি দুটি তিনটি আমার তোমার আপনার তার আমাদের তোমাদের তাদের বাংলা বাংলাদেশ ঢাকা ভালোবাসা ভালোবাসি মন মানুষ সময় দিন বছর মাস সপ্তাহ প্রশ্ন উত্তর সমস্যা সাহায্য দরকার চাই পারি পারো পারেন জানি জানো জানেন বুঝি বুঝতে শুনছি দেখছি খাচ্ছি খেয়েছো ঘুমাচ্ছি পড়ছি লিখছি কথা ফোন মেসেজ খবর নতুন পুরনো বড় ছোট"
-    private val dict by lazy { (enWords + " " + bnWords).split(" ").filter { it.isNotEmpty() } }
+    private val bnWords2 = "তোমাকে তোমার তোমাদের আপনাকে আমাকে তাকে তোমাকে ভালোবাসি ভালোবাসো ভালোবাসা কেমন আছো কেমন আছেন কোথায় যাচ্ছো যাচ্ছেন কী করছো কী করছেন কি খবর হ্যালো ঈদ মোবারক ঈদের শুভেচ্ছা রমজান নামাজ দোয়া আল্লাহ ইনশাআল্লাহ আলহামদুলিল্লাহ মাশাআল্লাহ আসসালামুআলাইকুম ওয়ালাইকুম স্বপ্ন জীবন পৃথিবী আকাশ বৃষ্টি রোদ গরম ঠান্ডা বাজার দোকান গাড়ি বাস ট্রেন রাস্তা শহর গ্রাম দেশ বিদেশ ভাষা শিক্ষা শিক্ষক ছাত্র ছাত্রী পরীক্ষা ফলাফল চাকরি ব্যবসা অফিস মিটিং কাজের জন্য কারণে সাথে মধ্যে পর্যন্ত থেকে হইতে দিয়ে নিয়ে নিয়েছি দিয়েছি গিয়েছি এসেছি বলেছি শুনেছি দেখেছি করেছি খেয়েছি ঘুমিয়েছি পড়েছি লিখেছি বুঝেছি জেনেছি পেয়েছি হারিয়েছি তোমরা আপনারা তারা এরা ওরা কারা কোন কখনো কখনও সবসময় প্রায় খুব বেশি কম আরও আর অন্য অন্যান্য প্রথম দ্বিতীয় শেষ আবার আবারও দয়া করে অবশ্যই অবশ্য হয়তো সম্ভবত নিশ্চয়ই নিশ্চিত সত্যি মিথ্যা সুন্দর চমৎকার দারুণ অসাধারণ মজা আনন্দ দুঃখ কষ্ট ভয় রাগ হাসি কান্না প্রেম বিয়ে সংসার পরিবার সন্তান ছেলে মেয়ে স্বামী স্ত্রী দাদা দাদি নানা নানি চাচা চাচি মামা মামি খালা ফুফু শুভরাত্রি শুভসকাল শুভদিন শুভ নববর্ষ"
+    private val dict by lazy { (enWords + " " + bnWords + " " + bnWords2).split(" ").filter { it.isNotEmpty() } }
+    private val dictSet by lazy { HashSet(dict) }
+    private val enList by lazy { enWords.split(" ").filter { it.isNotEmpty() } }
+    private val bnList by lazy { (bnWords + " " + bnWords2).split(" ").filter { it.isNotEmpty() }.distinct() }
 
     private fun isWordChar(c: Char) = c.isLetter() || c in '\u0980'..'\u09FF' || c == '\''
 
-    // ব্যঞ্জনবর্ণের পর কার বসে: ক-হ, নুক্তা, ড় ঢ় য়
+    // ব্যঞ্জনবর্ণের পর কার বসে: ক-হ, নুক্তা, ড় ঢ় য় (precomposed)
+    private fun isBnCons(c: Char) =
+        c in '\u0995'..'\u09B9' || c == '\u09BC' || c == '\u09DC' || c == '\u09DD' || c == '\u09DF'
+
     private fun afterConsonant(): Boolean {
         val b = currentInputConnection?.getTextBeforeCursor(1, 0) ?: return false
         if (b.isEmpty()) return false
-        val c = b[0]
-        return c in '\u0995'..'\u09B9' || c == '\u09BC' ||
-            c == '\u09DC' || c == '\u09DD' || c == '\u09DF'
+        return isBnCons(b[0])
     }
 
     private fun isPassword(): Boolean {
@@ -717,7 +778,7 @@ class KeyboardService : InputMethodService() {
             .apply()
     }
 
-    private fun nextWords(prev: String): List<String> {
+    private fun nextWords(prev: String, n: Int = 3): List<String> {
         if (prev.isEmpty()) return emptyList()
         loadBigrams()
         val pre = prev.lowercase() + " "
@@ -725,7 +786,7 @@ class KeyboardService : InputMethodService() {
             .filter { it.key.startsWith(pre) }
             .sortedByDescending { it.value }
             .map { it.key.substring(pre.length) }
-            .take(3)
+            .take(n)
     }
 
     private fun currentWord(): String {
@@ -778,14 +839,304 @@ class KeyboardService : InputMethodService() {
     private fun starters(): List<String> =
         if (lang == 1) listOf("আমি", "তুমি", "কেমন") else listOf("I", "The", "Hi")
 
-    private fun candidates(): List<String> {
+    // Avro: ধ্বনিগতভাবে কাছাকাছি শব্দ খোঁজার জন্য বানানকে সহজ রূপে নামানো হয়
+    // (ো বাদ, ী→ি, ূ→ু, ণ→ন, শ/ষ→স, হসন্ত বাদ ইত্যাদি)
+    private fun bnNorm(s: String): String {
+        val sb = StringBuilder()
+        for (c in s) {
+            when (c) {
+                '\u09CB', '\u09CD', '\u0981', '\u09BC' -> {}
+                '\u09C0' -> sb.append('\u09BF')
+                '\u09C2' -> sb.append('\u09C1')
+                '\u0988' -> sb.append('\u0987')
+                '\u098A' -> sb.append('\u0989')
+                '\u09A3' -> sb.append('\u09A8')
+                '\u09B6', '\u09B7' -> sb.append('\u09B8')
+                '\u09DF' -> sb.append('\u09AF')
+                '\u0993' -> sb.append('\u0985')
+                '\u09CE' -> sb.append('\u09A4')
+                else -> sb.append(c)
+            }
+        }
+        return sb.toString()
+    }
+
+    private val bnIndex: HashMap<String, String> by lazy {
+        val m = HashMap<String, String>()
+        for (w in bnList) {
+            val n = bnNorm(w)
+            if (!m.containsKey(n)) m[n] = w
+        }
+        m
+    }
+
+    private fun bnFuzzy(conv: String): List<String> {
+        loadLearned()
+        val nc = bnNorm(conv)
+        if (nc.isEmpty()) return emptyList()
+        val pool = ArrayList<String>()
+        for (e in learned.entries.sortedByDescending { it.value }) pool.add(e.key)
+        pool.addAll(bnList)
+        val out = LinkedHashSet<String>()
+        for (w in pool) {
+            if (w != conv && w.isNotEmpty() && w[0] in '\u0980'..'\u09FF' && bnNorm(w).startsWith(nc)) out.add(w)
+        }
+        return out.sortedBy { bnNorm(it).length }
+    }
+
+    private fun candidates(n: Int = 3): List<String> {
         if (isPassword()) return emptyList()
+        if (avroOn() && avroBuf.isNotEmpty()) {
+            val conv = avroConvert(avroBuf.toString())
+            val out = LinkedHashSet<String>()
+            out.add(conv)
+            out.addAll(bnFuzzy(conv))
+            return out.take(n)
+        }
         val w = currentWord()
         if (w.isEmpty()) {
-            val n = nextWords(previousWord())
-            return if (n.isNotEmpty()) n else starters()
+            val out = LinkedHashSet<String>(nextWords(previousWord(), n))
+            for (s in starters()) out.add(s)
+            return out.take(n)
         }
-        return matches(w).take(3)
+        return matches(w).take(n)
+    }
+
+    // ---------- Auto replace ----------
+    private val fixMap = mapOf(
+        "i" to "I", "im" to "I'm", "ive" to "I've", "dont" to "don't", "cant" to "can't",
+        "wont" to "won't", "didnt" to "didn't", "doesnt" to "doesn't", "isnt" to "isn't",
+        "wasnt" to "wasn't", "couldnt" to "couldn't", "shouldnt" to "shouldn't",
+        "wouldnt" to "wouldn't", "arent" to "aren't", "havent" to "haven't", "hasnt" to "hasn't",
+        "youre" to "you're", "thats" to "that's", "whats" to "what's", "theyre" to "they're",
+        "teh" to "the", "adn" to "and", "taht" to "that", "thier" to "their", "recieve" to "receive"
+    )
+
+    // একটি অক্ষর অদলবদল (teh→the) অথবা ৫+ অক্ষরের শব্দে একটি অক্ষর বাদ/বেশি
+    private fun closeEdit(a: String, b: String): Boolean {
+        if (a == b) return false
+        if (a.length == b.length) {
+            var i = 0
+            while (i < a.length && a[i] == b[i]) i++
+            if (i + 1 < a.length && a[i] == b[i + 1] && a[i + 1] == b[i]) {
+                return a.substring(i + 2) == b.substring(i + 2)
+            }
+            return false
+        }
+        if (Math.abs(a.length - b.length) == 1 && minOf(a.length, b.length) >= 4) {
+            val s = if (a.length < b.length) a else b
+            val l = if (a.length < b.length) b else a
+            var i = 0
+            while (i < s.length && s[i] == l[i]) i++
+            return s.substring(i) == l.substring(i + 1)
+        }
+        return false
+    }
+
+    private fun engFix(w: String): String? {
+        if (w.isEmpty()) return null
+        val lw = w.lowercase()
+        val m = fixMap[lw]
+        if (m != null) return if (w[0].isUpperCase() && !m[0].isUpperCase()) m.replaceFirstChar { it.uppercase() } else m
+        if (lw.length < 3 || !lw.all { it in 'a'..'z' }) return null
+        loadLearned()
+        if (dictSet.contains(lw) || learned.containsKey(lw)) return null
+        var best: String? = null
+        for (d in enList) {
+            if (d.length >= 3 && closeEdit(lw, d)) {
+                best = d
+                break
+            }
+        }
+        val b = best ?: return null
+        return if (w[0].isUpperCase()) b.replaceFirstChar { it.uppercase() } else b
+    }
+
+    private fun tryAutoReplace() {
+        if (!autoReplace || isPassword() || lang != 0) return
+        val w = currentWord()
+        val fix = engFix(w) ?: return
+        val ic = currentInputConnection ?: return
+        ic.deleteSurroundingText(w.length, 0)
+        ic.commitText(fix, 1)
+    }
+
+    private fun avroFix(w: String): String? {
+        if (dictSet.contains(w)) return null
+        loadLearned()
+        if (learned.containsKey(w)) return null
+        val r = bnIndex[bnNorm(w)] ?: return null
+        return if (r != w) r else null
+    }
+
+    // ================= Avro Phonetic engine =================
+    // একটি token = [key, kind, ...]
+    //  C = ব্যঞ্জন (আগের ব্যঞ্জনের সাথে নিজে থেকেই হসন্ত দিয়ে যুক্ত হয়), V = স্বর (ব্যঞ্জনের পর কার)
+    //  S = চিহ্ন, বাকিগুলো বিশেষ নিয়ম
+    private val avroTokens: List<Array<String>> by lazy {
+        val l = ArrayList<Array<String>>()
+        fun c(k: String, v: String) { l.add(arrayOf(k, "C", v)) }
+        fun v(k: String, ind: String, kar: String) { l.add(arrayOf(k, "V", ind, kar)) }
+        fun s(k: String, x: String) { l.add(arrayOf(k, "S", x)) }
+        fun sp(k: String, t: String) { l.add(arrayOf(k, t)) }
+        c("kkh", "ক্ষ"); c("kh", "খ"); c("k", "ক"); c("q", "ক"); c("x", "ক্স")
+        c("GG", "জ্ঞ"); c("gh", "ঘ"); c("g", "গ")
+        c("Ng", "ঙ"); c("NG", "ঞ")
+        c("ngkh", "ঙ্খ"); c("ngk", "ঙ্ক"); c("nggh", "ঙ্ঘ"); c("ngg", "ঙ্গ")
+        c("njh", "ঞ্ঝ"); c("nj", "ঞ্জ"); c("nch", "ঞ্ছ"); c("nc", "ঞ্চ")
+        c("chh", "ছ"); c("ch", "ছ"); c("c", "চ"); c("jh", "ঝ"); c("j", "জ")
+        c("Th", "ঠ"); c("T", "ট"); c("Dh", "ঢ"); c("D", "ড"); c("N", "ণ")
+        c("th", "থ"); c("t", "ত"); c("dh", "ধ"); c("d", "দ"); c("n", "ন")
+        c("ph", "ফ"); c("p", "প"); c("f", "ফ"); c("bh", "ভ"); c("b", "ব"); c("v", "ভ"); c("m", "ম")
+        c("z", "য"); c("r", "র"); c("l", "ল")
+        c("sh", "শ"); c("Sh", "ষ"); c("S", "শ"); c("s", "স"); c("h", "হ")
+        c("Rh", "\u09DD"); c("R", "\u09DC")
+        v("rri", "ঋ", "ৃ"); v("OI", "ঐ", "ৈ"); v("OU", "ঔ", "ৌ")
+        v("aa", "আ", "া"); v("a", "আ", "া")
+        v("ii", "ঈ", "ী"); v("ee", "ঈ", "ী"); v("I", "ঈ", "ী"); v("i", "ই", "ি")
+        v("oo", "ঊ", "ূ"); v("uu", "ঊ", "ূ"); v("U", "ঊ", "ূ"); v("u", "উ", "ু")
+        v("e", "এ", "ে"); v("O", "ও", "ো")
+        s("t``", "\u09CE"); s("ng", "ং"); s(":", "ঃ"); s("^", "ঁ")
+        sp("o", "o"); sp("y", "y"); sp("w", "w"); sp("Z", "Z"); sp("rr", "rr"); sp("`", "brk")
+        l.sortByDescending { it[0].length }
+        l
+    }
+
+    private fun avroConvert(src: String): String {
+        var str = src
+        val out = StringBuilder()
+        var brk = false // true = আগের ব্যঞ্জন "বন্ধ" (যেমন অন্তর্নিহিত 'অ' এর পর) — যুক্ত হবে না, স্বর স্বাধীন হবে
+        var i = 0
+        while (i < str.length) {
+            var tok: Array<String>? = null
+            for (t in avroTokens) {
+                if (str.startsWith(t[0], i)) {
+                    tok = t
+                    break
+                }
+            }
+            if (tok == null) {
+                val ch = str[i]
+                if (ch.lowercaseChar() != ch) { // বড় হাতের অক্ষর যার আলাদা নিয়ম নেই → ছোট হাতেরটা
+                    str = str.substring(0, i) + ch.lowercaseChar() + str.substring(i + 1)
+                    continue
+                }
+                out.append(ch)
+                brk = true
+                i++
+                continue
+            }
+            val k = tok[0]
+            val lc = !brk && out.isNotEmpty() && isBnCons(out[out.length - 1])
+            when (tok[1]) {
+                "C" -> {
+                    if (lc) out.append('\u09CD')
+                    out.append(tok[2])
+                    brk = false
+                }
+                "V" -> {
+                    out.append(if (lc) tok[3] else tok[2])
+                    brk = false
+                }
+                "S" -> {
+                    out.append(tok[2])
+                    brk = false
+                }
+                "o" -> {
+                    if (lc) {
+                        if (i + k.length >= str.length) {
+                            out.append('\u09CB') // শব্দের শেষে ব্যঞ্জন+o = ো (ভালো)
+                            brk = false
+                        } else {
+                            brk = true // মাঝে 'o' = অন্তর্নিহিত অ (কলম)
+                        }
+                    } else {
+                        out.append(if (out.isEmpty()) '\u0985' else '\u0993')
+                        brk = false
+                    }
+                }
+                "y" -> {
+                    out.append(if (lc) "\u09CD\u09AF" else "\u09DF")
+                    brk = false
+                }
+                "w" -> {
+                    out.append(if (lc) "\u09CD\u09AC" else "\u0993")
+                    brk = false
+                }
+                "Z" -> {
+                    out.append(if (lc) "\u09CD\u09AF" else "\u09AF")
+                    brk = false
+                }
+                "rr" -> {
+                    out.append("\u09B0\u09CD") // র্ (রেফ)
+                    brk = false
+                }
+                "brk" -> brk = true
+            }
+            i += k.length
+        }
+        return out.toString()
+    }
+
+    private fun avroOn() = translit && lang == 1
+
+    private fun flushAvro() {
+        if (avroBuf.isNotEmpty()) {
+            currentInputConnection?.finishComposingText()
+            avroBuf.setLength(0)
+        }
+    }
+
+    private fun finishAvro(replaceFix: Boolean) {
+        if (avroBuf.isEmpty()) return
+        var w = avroConvert(avroBuf.toString())
+        val prev = previousWord()
+        if (replaceFix && autoReplace) {
+            val f = avroFix(w)
+            if (f != null) w = f
+        }
+        currentInputConnection?.commitText(w, 1)
+        avroBuf.setLength(0)
+        learn(w)
+        learnBigram(prev, w)
+    }
+
+    private fun avroType(ic: InputConnection, s: String) {
+        if (s.length == 1) {
+            val c = s[0]
+            val isLetter = c in 'a'..'z' || c in 'A'..'Z' || c == '`'
+            val isMark = (c == ':' || c == '^') && avroBuf.isNotEmpty()
+            if (isLetter || isMark) {
+                avroBuf.append(s)
+                lastAvroTime = SystemClock.uptimeMillis()
+                ic.setComposingText(avroConvert(avroBuf.toString()), 1)
+                afterType()
+                return
+            }
+        }
+        if (avroBuf.isNotEmpty()) finishAvro(true)
+        var out = s
+        if (s.length == 1) {
+            val ch = s[0]
+            val b = ic.getTextBeforeCursor(1, 0)
+            val bc = if (b != null && b.isNotEmpty()) b[0] else ' '
+            if (ch in '0'..'9' && avroDigits) {
+                out = ('\u09E6' + (ch - '0')).toString()
+            } else if (ch == '.') {
+                if (bc == '\u0964') {
+                    ic.deleteSurroundingText(1, 0)
+                    out = "."
+                } else if (bc in '\u09E6'..'\u09EF' || bc in '0'..'9') {
+                    out = "."
+                } else {
+                    out = "\u0964" // ।
+                }
+            } else if (ch == '$') {
+                out = "\u09F3" // ৳
+            }
+        }
+        ic.commitText(out, 1)
+        afterType()
     }
 
     // Top bar rule:
@@ -799,9 +1150,7 @@ class KeyboardService : InputMethodService() {
         if (panel == 1 && panelSug.isEmpty()) panelSug = defaultEmojis().take(7)
         box.removeAllViews()
         if (!showSug) {
-            box.addView(iconKey(1) { openPanel(1) })
-            box.addView(iconKey(3) { openPanel(3) })
-            box.addView(iconKey(2) { openPanel(2) })
+            for (id in tbBar) box.addView(toolIcon(id))
         } else if (panel == 1) {
             for (e in panelSug) {
                 box.addView(TextView(this).apply {
@@ -817,7 +1166,7 @@ class KeyboardService : InputMethodService() {
                 })
             }
         } else {
-            val list = if (suggestOn) candidates() else emptyList()
+            val list = if (suggestOn) candidates(3) else emptyList()
             for ((i, s) in list.withIndex()) {
                 if (i > 0) {
                     box.addView(View(this).apply {
@@ -858,6 +1207,8 @@ class KeyboardService : InputMethodService() {
         val icon = leftIcon ?: return
         val box = sugBox ?: return
         val showingSug = lastShowSug
+        val wasExpanded = sugExpanded
+        sugExpanded = false
         icon.animate().cancel()
         icon.rotation = 0f
         icon.animate().rotation(360f).scaleX(1.2f).scaleY(1.2f).setDuration(260)
@@ -871,13 +1222,19 @@ class KeyboardService : InputMethodService() {
         box.animate().alpha(0f).setDuration(130).withEndAction {
             barMode = if (showingSug) 1 else 2
             barManual = true
-            refreshSuggestions()
-            box.animate().alpha(1f).setDuration(180).start()
+            if (wasExpanded) {
+                render()
+            } else {
+                refreshSuggestions()
+                box.animate().alpha(1f).setDuration(180).start()
+            }
         }.start()
     }
 
     // Opening a panel keeps the tools row visible (barMode = 1) until you tap T.
     private fun openPanel(p: Int) {
+        flushAvro()
+        sugExpanded = false
         if (panel == p) {
             closePanel()
         } else {
@@ -891,6 +1248,7 @@ class KeyboardService : InputMethodService() {
 
     private fun closePanel() {
         panel = 0
+        sugExpanded = false
         barMode = 0
         barManual = false
         render()
@@ -898,13 +1256,259 @@ class KeyboardService : InputMethodService() {
 
     private fun pick(s: String) {
         val ic = currentInputConnection ?: return
-        val prev = previousWord()
-        val w = currentWord()
-        ic.deleteSurroundingText(w.length, 0)
-        ic.commitText(s + " ", 1)
-        learn(s)
-        learnBigram(prev, s)
-        refreshSuggestions()
+        val wasExpanded = sugExpanded
+        sugExpanded = false
+        if (avroOn() && avroBuf.isNotEmpty()) {
+            val prev = previousWord()
+            ic.commitText(s + " ", 1)
+            avroBuf.setLength(0)
+            learn(s)
+            learnBigram(prev, s)
+        } else {
+            val prev = previousWord()
+            val w = currentWord()
+            ic.deleteSurroundingText(w.length, 0)
+            ic.commitText(s + " ", 1)
+            learn(s)
+            learnBigram(prev, s)
+        }
+        if (wasExpanded) render() else refreshSuggestions()
+    }
+
+    // ================= Toolbar tools =================
+    private fun toolById(id: String): Tool? = allTools.firstOrNull { it.id == id }
+
+    private fun toolActive(id: String) = when (id) {
+        "translit" -> translit
+        "emoji" -> panel == 1
+        "clip" -> panel == 2
+        "edit" -> panel == 3
+        "settings" -> panel == 4
+        "modes" -> panel == 7
+        else -> false
+    }
+
+    private fun runTool(id: String) {
+        when (id) {
+            "emoji" -> openPanel(1)
+            "clip" -> openPanel(2)
+            "edit" -> openPanel(3)
+            "settings" -> openPanel(4)
+            "modes" -> openPanel(7)
+            "translit" -> toggleTranslit()
+        }
+    }
+
+    private fun toggleTranslit() {
+        flushAvro()
+        translit = !translit
+        putPref("translit", if (translit) 1 else 0)
+        if (translit) lang = 1
+        mode = 0
+        shift = false
+        caps = false
+        closePanel()
+        showToast(
+            if (translit) "Avro transliteration ON — ইংরেজি অক্ষরে বাংলা লিখুন (ami → আমি)"
+            else "Transliteration OFF — Samsung বাংলা লেআউট"
+        )
+    }
+
+    private fun loadTools() {
+        val p = getSharedPreferences("kb", MODE_PRIVATE)
+        fun valid(s: String?, def: String): List<String> =
+            (s ?: def).split(",").filter { id -> allTools.any { it.id == id } }.distinct()
+        val b = valid(p.getString("tb_bar", null), "emoji,edit,clip").toMutableList()
+        while (b.size > maxBarTools) b.removeAt(b.size - 1)
+        val pn = valid(p.getString("tb_panel", null), "modes,settings,translit").filter { it !in b }.toMutableList()
+        tbBar = b
+        tbPanel = pn
+        for (t in allTools) if (t.id !in tbBar && t.id !in tbPanel) tbPanel.add(t.id)
+    }
+
+    private fun saveTools() {
+        getSharedPreferences("kb", MODE_PRIVATE).edit()
+            .putString("tb_bar", tbBar.joinToString(","))
+            .putString("tb_panel", tbPanel.joinToString(","))
+            .apply()
+    }
+
+    private fun toolIcon(id: String): View {
+        val t = toolById(id) ?: return View(this)
+        val v = IconView(t.kind)
+        v.tint = if (toolActive(id)) 0xFF2F7CF6.toInt() else 0
+        v.background = bg(0)
+        v.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
+        }
+        toolTouch(v, id)
+        return v
+    }
+
+    private fun toolTile(id: String): View {
+        val t = toolById(id) ?: return View(this)
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, MP, 1f)
+            background = bg(0)
+        }
+        val ic = IconView(t.kind)
+        ic.tint = if (toolActive(id)) 0xFF2F7CF6.toInt() else 0
+        ic.layoutParams = LinearLayout.LayoutParams(dp(34), dp(34))
+        tile.addView(ic)
+        tile.addView(TextView(this).apply {
+            text = t.label
+            textSize = 12f
+            maxLines = 1
+            gravity = Gravity.CENTER
+            setTextColor(textCol())
+            setPadding(0, dp(2), 0, 0)
+        })
+        toolTouch(tile, id)
+        return tile
+    }
+
+    // tap = কাজ করবে; "..." প্যানেল খোলা থাকলে চেপে ধরে টানলে (drag) toolbar ↔ প্যানেলে সরানো / সাজানো যায়
+    private fun toolTouch(v: View, id: String) {
+        var sx = 0f
+        var sy = 0f
+        var dragging = false
+        var moved = false
+        val longPress = Runnable {
+            if (panel == 5 && !moved) {
+                dragging = true
+                v.parent?.requestDisallowInterceptTouchEvent(true)
+                startDrag(v, id)
+            }
+        }
+        v.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    sx = e.rawX
+                    sy = e.rawY
+                    dragging = false
+                    moved = false
+                    v.isPressed = true
+                    uiHandler.postDelayed(longPress, 380)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (dragging) {
+                        moveGhost(e.rawX, e.rawY)
+                    } else if (Math.hypot((e.rawX - sx).toDouble(), (e.rawY - sy).toDouble()) > dp(8)) {
+                        moved = true
+                        uiHandler.removeCallbacks(longPress)
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    v.isPressed = false
+                    uiHandler.removeCallbacks(longPress)
+                    if (dragging) {
+                        dragging = false
+                        endDrag(id, e.rawX, e.rawY)
+                    } else if (!moved) {
+                        feedback(v)
+                        runTool(id)
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    v.isPressed = false
+                    uiHandler.removeCallbacks(longPress)
+                    if (dragging) {
+                        dragging = false
+                        cancelDrag()
+                    }
+                }
+            }
+            true
+        }
+    }
+
+    private fun startDrag(v: View, id: String) {
+        val t = toolById(id) ?: return
+        val g = IconView(t.kind)
+        g.tint = 0xFF2F7CF6.toInt()
+        g.cutColor = keyBg()
+        g.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(keyBg())
+        }
+        g.elevation = dp(8).toFloat()
+        g.layoutParams = FrameLayout.LayoutParams(dp(52), dp(52), Gravity.TOP or Gravity.START)
+        overlay.addView(g)
+        ghost = g
+        dragSrc = v
+        v.alpha = 0.25f
+        v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
+    private fun moveGhost(rx: Float, ry: Float) {
+        val g = ghost ?: return
+        val b = IntArray(2)
+        host.getLocationOnScreen(b)
+        g.translationX = rx - b[0] - dp(26)
+        g.translationY = ry - b[1] - dp(26) - dp(24)
+    }
+
+    private fun cancelDrag() {
+        ghost?.let { overlay.removeView(it) }
+        ghost = null
+        dragSrc?.alpha = 1f
+        dragSrc = null
+    }
+
+    private fun hit(v: View, rx: Float, ry: Float, pad: Int): Boolean {
+        val l = IntArray(2)
+        v.getLocationOnScreen(l)
+        return rx >= l[0] - pad && rx <= l[0] + v.width + pad && ry >= l[1] - pad && ry <= l[1] + v.height + pad
+    }
+
+    private fun endDrag(id: String, rx: Float, ry: Float) {
+        val src = dragSrc
+        ghost?.let { overlay.removeView(it) }
+        ghost = null
+        dragSrc?.alpha = 1f
+        dragSrc = null
+        val bar = sugBox
+        val area = moreArea
+        val inBar = bar != null && hit(bar, rx, ry, dp(14))
+        val inArea = !inBar && area != null && hit(area, rx, ry, 0)
+        if (!inBar && !inArea) return
+        val oldBar = tbBar.toMutableList()
+        val oldPanel = tbPanel.toMutableList()
+        tbBar.remove(id)
+        tbPanel.remove(id)
+        if (inBar && bar != null) {
+            if (tbBar.size >= maxBarTools) {
+                tbBar = oldBar
+                tbPanel = oldPanel
+                showToast("Toolbar full — আগে একটা সরান")
+                return
+            }
+            var idx = 0
+            val loc = IntArray(2)
+            for (i in 0 until bar.childCount) {
+                val c = bar.getChildAt(i)
+                if (c === src) continue
+                c.getLocationOnScreen(loc)
+                if (loc[0] + c.width / 2f < rx) idx++
+            }
+            tbBar.add(idx.coerceIn(0, tbBar.size), id)
+        } else {
+            var idx = 0
+            val loc = IntArray(2)
+            val half = dp(38)
+            for ((tv, tid) in moreTiles) {
+                if (tid == id) continue
+                tv.getLocationOnScreen(loc)
+                val cy = loc[1] + tv.height / 2f
+                val cx = loc[0] + tv.width / 2f
+                if (cy < ry - half || (Math.abs(cy - ry) <= half && cx < rx)) idx++
+            }
+            tbPanel.add(idx.coerceIn(0, tbPanel.size), id)
+        }
+        saveTools()
+        render()
     }
 
     // ================= Clipboard data =================
@@ -1158,12 +1762,12 @@ class KeyboardService : InputMethodService() {
         else -> 48
     }
 
-    // বাংলা অক্ষর কিবোর্ডে ৬ সারি, ইংরেজি ও সিম্বলে ৫ সারি।
+    // বাংলা (Samsung) অক্ষর কিবোর্ডে ৬ সারি, ইংরেজি/Avro/সিম্বলে ৫ সারি।
     // তাই ইংরেজি/সিম্বলের প্রতিটি সারি একটু লম্বা, যাতে মোট উচ্চতা বাংলার সমান হয়।
     private fun keyH(): Int {
         val b = baseKeyH()
         val letterPanel = panel == 0 || panel == 6
-        val bangla = lang == 1 && mode == 0
+        val bangla = lang == 1 && !translit && mode == 0
         return if (letterPanel && !bangla) Math.round((b + 6) * 6f / 5f) - 6 else b
     }
 
@@ -1180,9 +1784,15 @@ class KeyboardService : InputMethodService() {
         haptic = p.getInt("haptic", 1) == 1
         sound = p.getInt("sound", 0) == 1
         suggestOn = p.getInt("suggest", 1) == 1
-        oneHand = p.getInt("onehand", 0)
+        kbMode = p.getInt("kbmode", p.getInt("onehand", 0))
         clipOn = p.getInt("cliphist", 1) == 1
         clipExpire = p.getInt("clipexp", 0)
+        autoReplace = p.getInt("autorep", 0) == 1
+        autoCap = p.getInt("autocap", 1) == 1
+        previewOn = p.getInt("preview", 1) == 1
+        translit = p.getInt("translit", 0) == 1
+        avroDigits = p.getInt("avrodigits", 1) == 1
+        loadTools()
 
         val saved3 = p.getString("clips3", "") ?: ""
         if (saved3.isNotEmpty()) {
@@ -1213,6 +1823,7 @@ class KeyboardService : InputMethodService() {
         previewView = null
         langPopup = null
         toastView = null
+        ghost = null
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -1229,9 +1840,16 @@ class KeyboardService : InputMethodService() {
         if (::root.isInitialized) {
             panel = 0
             selecting = false
+            sugExpanded = false
             barMode = 0
             barManual = false
+            avroBuf.setLength(0)
+            shiftManual = false
             searchQ.setLength(0)
+            if (autoCap && lang == 0 && !caps) {
+                val m = currentInputConnection?.getCursorCapsMode(info?.inputType ?: 0) ?: 0
+                shift = m != 0
+            }
             render()
             host.animate().cancel()
             if (restarting) {
@@ -1246,6 +1864,11 @@ class KeyboardService : InputMethodService() {
         }
     }
 
+    override fun onFinishInputView(finishingInput: Boolean) {
+        avroBuf.setLength(0)
+        super.onFinishInputView(finishingInput)
+    }
+
     override fun onUpdateSelection(
         oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int,
         candidatesStart: Int, candidatesEnd: Int
@@ -1254,7 +1877,24 @@ class KeyboardService : InputMethodService() {
             oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
         )
         if (::root.isInitialized) {
+            // Avro: কার্সর অন্য জায়গায় সরে গেলে composing বন্ধ (দ্রুত টাইপের সময় পুরনো আপডেট উপেক্ষা)
+            if (avroBuf.isNotEmpty() && SystemClock.uptimeMillis() - lastAvroTime > 300 &&
+                (candidatesStart < 0 || newSelStart != candidatesEnd || newSelEnd != candidatesEnd)
+            ) {
+                avroBuf.setLength(0)
+                currentInputConnection?.finishComposingText()
+            }
             refreshSuggestions()
+            // ইংরেজি: বাক্যের শুরুতে নিজে থেকে বড় হাতের অক্ষর
+            if (autoCap && lang == 0 && !caps && !shiftManual && panel == 0 && !backHeld && !sugExpanded) {
+                val m = currentInputConnection
+                    ?.getCursorCapsMode(currentInputEditorInfo?.inputType ?: 0) ?: 0
+                val want = m != 0
+                if (want != shift) {
+                    shift = want
+                    render()
+                }
+            }
             // বাংলা: ব্যঞ্জনের আগে/পরে বদলালে বাম দিকের স্বর/কার অংশ আবার আঁকা হবে
             if (!backHeld) syncBnContext()
         }
@@ -1272,11 +1912,23 @@ class KeyboardService : InputMethodService() {
         hideLangPopup()
         previewKeys.clear()
         curKeyFor.clear()
-        val side = if (oneHand == 0) 0 else (resources.displayMetrics.widthPixels * 0.22f).toInt()
-        root.setPadding(
-            dp(4) + (if (oneHand == 2) side else 0), dp(6),
-            dp(4) + (if (oneHand == 1) side else 0), dp(10)
-        )
+        moreTiles.clear()
+        moreArea = null
+        if (panel != 0) sugExpanded = false
+        val w = resources.displayMetrics.widthPixels
+        val side = (w * 0.22f).toInt()
+        val cside = (w * 0.09f).toInt()
+        var padL = dp(4)
+        var padR = dp(4)
+        when (kbMode) {
+            1 -> padR += side
+            2 -> padL += side
+            4 -> {
+                padL += cside
+                padR += cside
+            }
+        }
+        root.setPadding(padL, dp(6), padR, dp(10))
         root.setBackgroundColor(bgColor())
         root.removeAllViews()
         sugBox = null
@@ -1299,14 +1951,30 @@ class KeyboardService : InputMethodService() {
             4 -> { root.addView(toolbarRow()); renderSettings(); return }
             5 -> { root.addView(toolbarRow()); renderMore(); return }
             6 -> { renderSearch(); return }
+            7 -> { root.addView(toolbarRow()); renderModes(); return }
         }
         root.addView(toolbarRow())
+        if (sugExpanded) {
+            renderSugExpanded()
+            return
+        }
+        val start = root.childCount
         when {
             mode != 0 -> renderSymbols()
-            lang == 1 -> renderBangla()
+            lang == 1 && !translit -> renderBangla()
             else -> renderEnglish()
         }
+        if (kbMode == 3) splitRows(start)
         root.addView(bottomRow())
+    }
+
+    // Split mode: প্রতিটি সারির মাঝখানে ফাঁকা জায়গা
+    private fun splitRows(start: Int) {
+        for (i in start until root.childCount) {
+            val line = root.getChildAt(i) as? LinearLayout ?: continue
+            val n = line.childCount
+            if (n >= 4) line.addView(spacer(0.9f), n / 2)
+        }
     }
 
     private fun toolbarRow(): LinearLayout {
@@ -1335,7 +2003,29 @@ class KeyboardService : InputMethodService() {
         }
         sugBox = box
         line.addView(box)
-        line.addView(iconKey(4, 1f) { openPanel(5) })
+
+        // "..." : tools মোডে → More প্যানেল (Modes/Settings/Transliterate...),
+        //          suggestion মোডে → আরও suggestion + Auto replace
+        val dots = IconView(4)
+        dots.background = if (panel == 5 || sugExpanded) {
+            GradientDrawable().apply {
+                cornerRadius = dp(20).toFloat()
+                setColor(0x55808080)
+            }
+        } else bg(0)
+        dots.layoutParams = LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
+        }
+        dots.setOnClickListener {
+            feedback(it)
+            if (lastShowSug && panel == 0) {
+                sugExpanded = !sugExpanded
+                render()
+            } else {
+                openPanel(5)
+            }
+        }
+        line.addView(dots)
         barFresh = true
         refreshSuggestions()
         return line
@@ -1386,6 +2076,80 @@ class KeyboardService : InputMethodService() {
     private fun scrollBox(h: Int = 200) = ScrollView(this).apply {
         layoutParams = LinearLayout.LayoutParams(MP, dp(h))
         isVerticalScrollBarEnabled = false
+    }
+
+    // ---------- Suggestion bar "..." : বড় suggestion গ্রিড + Auto replace ----------
+    private fun renderSugExpanded() {
+        val h = 6 * (baseKeyH() + 6)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = popupBg(16)
+            layoutParams = LinearLayout.LayoutParams(MP, dp(h)).apply {
+                setMargins(dp(2), dp(2), dp(2), 0)
+            }
+            setPadding(dp(4), dp(4), dp(4), dp(6))
+        }
+        val list = candidates(12).drop(3)
+        if (list.isEmpty()) {
+            card.addView(TextView(this).apply {
+                text = "No more suggestions"
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(0xFF8A8A8A.toInt())
+                setPadding(0, dp(20), 0, dp(20))
+            })
+        }
+        for (chunk in list.chunked(3)) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(MP, dp(50))
+            }
+            for (s in chunk) {
+                row.addView(TextView(this).apply {
+                    text = s
+                    textSize = 17f
+                    maxLines = 1
+                    gravity = Gravity.CENTER
+                    setTextColor(textCol())
+                    background = bg(0)
+                    layoutParams = LinearLayout.LayoutParams(0, MP, 1f)
+                    setOnClickListener {
+                        feedback(it)
+                        pick(s)
+                    }
+                })
+            }
+            repeat(3 - chunk.size) {
+                row.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) })
+            }
+            card.addView(row)
+        }
+        card.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 0, 1f) })
+        val ar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(22).toFloat()
+                setColor(fnBg())
+            }
+            setPadding(dp(18), 0, dp(14), 0)
+            layoutParams = LinearLayout.LayoutParams(MP, dp(48))
+        }
+        ar.addView(TextView(this).apply {
+            text = "Auto replace"
+            textSize = 16f
+            setTextColor(textCol())
+            layoutParams = LinearLayout.LayoutParams(0, WC, 1f)
+        })
+        val sw = Switch(this)
+        sw.isChecked = autoReplace
+        sw.setOnCheckedChangeListener { _, c ->
+            autoReplace = c
+            putPref("autorep", if (c) 1 else 0)
+        }
+        ar.addView(sw)
+        card.addView(ar)
+        root.addView(card)
     }
 
     // ---------- Emoji ----------
@@ -1506,6 +2270,7 @@ class KeyboardService : InputMethodService() {
 
     // ---------- Emoji search ----------
     private fun enterSearch() {
+        flushAvro()
         searchQ.setLength(0)
         val switched = lang != 0
         lang = 0
@@ -1760,678 +2525,4 @@ class KeyboardService : InputMethodService() {
             for (c in chunk) line.addView(clipCard(c))
             repeat(3 - chunk.size) {
                 line.addView(View(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, dp(10), 1f)
-                })
-            }
-            col.addView(line)
-        }
-        scroll.addView(col)
-        frame.addView(scroll)
-        val m = menuClip
-        if (m != null) frame.addView(clipMenuView(m))
-        root.addView(frame)
-    }
-
-    private fun clipCard(c: Clip): View {
-        val isSel = c in selected
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(7), dp(8), dp(5))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(8).toFloat()
-                if (isSel) {
-                    setStroke(dp(2), 0xFF34A853.toInt())
-                } else if (c.locked) {
-                    setStroke(dp(2), 0xFF2F7CF6.toInt())
-                }
-                setColor(keyBg())
-            }
-            layoutParams = LinearLayout.LayoutParams(0, dp(92), 1f).apply {
-                setMargins(dp(3), dp(3), dp(3), dp(3))
-            }
-        }
-        card.addView(TextView(this).apply {
-            text = c.text
-            textSize = 13f
-            maxLines = 4
-            ellipsize = TextUtils.TruncateAt.END
-            setTextColor(textCol())
-            layoutParams = LinearLayout.LayoutParams(MP, 0, 1f)
-        })
-        val kind = clipKind(c.text)
-        card.addView(TextView(this).apply {
-            text = (if (isSel) "✓ " else if (c.locked) "Locked · " else "") +
-                ago(c.time) +
-                (if (kind == 1) " · Link" else if (kind == 2) " · Number" else "")
-            textSize = 10f
-            maxLines = 1
-            setTextColor(0xFF8A8A8A.toInt())
-        })
-        card.setOnClickListener {
-            feedback(it)
-            if (selMode) {
-                if (c in selected) selected.remove(c) else selected.add(c)
-                render()
-            } else {
-                currentInputConnection?.commitText(c.text, 1)
-            }
-        }
-        card.setOnLongClickListener {
-            if (!selMode) {
-                menuClip = c
-                render()
-            }
-            true
-        }
-        return card
-    }
-
-    private fun clipMenuView(c: Clip): View {
-        val dim = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(MP, MP)
-            setBackgroundColor(0x55000000)
-            setOnClickListener {
-                menuClip = null
-                render()
-            }
-        }
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                cornerRadius = dp(18).toFloat()
-                setColor(keyBg())
-            }
-            layoutParams = FrameLayout.LayoutParams(dp(260), WC, Gravity.CENTER)
-            setPadding(dp(6), dp(4), dp(6), dp(4))
-        }
-        card.addView(menuItem("Delete from clipboard") {
-            clips.remove(c)
-            menuClip = null
-            saveClips()
-            render()
-        })
-        card.addView(menuItem(if (c.locked) "Unlock from clipboard" else "Lock to clipboard") {
-            c.locked = !c.locked
-            menuClip = null
-            saveClips()
-            render()
-        })
-        card.addView(menuItem("Select") {
-            selMode = true
-            selected.clear()
-            selected.add(c)
-            menuClip = null
-            render()
-        })
-        dim.addView(card)
-        return dim
-    }
-
-    private fun menuItem(label: String, onTap: () -> Unit) = TextView(this).apply {
-        text = label
-        textSize = 16f
-        setTextColor(textCol())
-        setPadding(dp(18), dp(14), dp(18), dp(14))
-        setOnClickListener { onTap() }
-    }
-
-    // ---------- Text editing ----------
-    private fun sendArrow(code: Int) {
-        val ic = currentInputConnection ?: return
-        val now = SystemClock.uptimeMillis()
-        val meta = if (selecting) KeyEvent.META_SHIFT_ON else 0
-        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, meta))
-        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, meta))
-    }
-
-    private fun menuAction(id: Int) {
-        currentInputConnection?.performContextMenuAction(id)
-    }
-
-    private fun renderTextEdit() {
-        val top = newLine()
-        top.addView(key("⇤", 1f, fn = true) { sendArrow(KeyEvent.KEYCODE_MOVE_HOME) })
-        top.addView(key("Select all", 4f, fn = true, sp = 15f) { menuAction(android.R.id.selectAll) })
-        top.addView(key("⇥", 1f, fn = true) { sendArrow(KeyEvent.KEYCODE_MOVE_END) })
-        top.addView(key("✕", 1.5f, flat = true) {
-            selecting = false
-            closePanel()
-        })
-        root.addView(top)
-
-        val body = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(MP, WC)
-        }
-        val left = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, WC, 6f)
-        }
-        val up = newLine()
-        up.addView(spacer(1.5f))
-        up.addView(key("↑", 1f, fn = true, repeat = true) { sendArrow(KeyEvent.KEYCODE_DPAD_UP) })
-        up.addView(spacer(1.5f))
-        left.addView(up)
-
-        val mid = newLine()
-        mid.addView(key("←", 1f, fn = true, repeat = true) { sendArrow(KeyEvent.KEYCODE_DPAD_LEFT) })
-        mid.addView(key("Select", 2f, fn = !selecting, accent = selecting, sp = 14f) {
-            selecting = !selecting
-            render()
-        })
-        mid.addView(key("→", 1f, fn = true, repeat = true) { sendArrow(KeyEvent.KEYCODE_DPAD_RIGHT) })
-        left.addView(mid)
-
-        val down = newLine()
-        down.addView(spacer(1.5f))
-        down.addView(key("↓", 1f, fn = true, repeat = true) { sendArrow(KeyEvent.KEYCODE_DPAD_DOWN) })
-        down.addView(spacer(1.5f))
-        left.addView(down)
-
-        val right = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, WC, 3f)
-        }
-        val r1 = newLine()
-        r1.addView(key("Cut", 1f, fn = true, sp = 14f) { menuAction(android.R.id.cut) })
-        right.addView(r1)
-        val r2 = newLine()
-        r2.addView(key("Copy", 1f, fn = true, sp = 14f) { menuAction(android.R.id.copy) })
-        right.addView(r2)
-        val r3 = newLine()
-        r3.addView(key("Paste", 1f, fn = true, sp = 14f) { menuAction(android.R.id.paste) })
-        right.addView(r3)
-        val r4 = newLine()
-        r4.addView(backKey(1f))
-        right.addView(r4)
-
-        body.addView(left)
-        body.addView(right)
-        root.addView(body)
-    }
-
-    // ---------- More ----------
-    private fun renderMore() {
-        root.addView(panelHeader("More"))
-        val themeNames = listOf("Auto", "Light", "Dark")
-        val heightNames = listOf("Small", "Medium", "Large")
-        val handNames = listOf("Off", "Left", "Right")
-
-        fun tile(label: String, onTap: () -> Unit): Button =
-            key(label, 1f, fn = true, hDp = 64, sp = 14f, onTap = onTap)
-
-        val r1 = newLine()
-        r1.addView(tile("Settings") {
-            panel = 4
-            render()
-        })
-        r1.addView(tile("One-handed\n" + handNames[oneHand]) {
-            oneHand = (oneHand + 1) % 3
-            putPref("onehand", oneHand)
-            render()
-        })
-        r1.addView(tile("Theme\n" + themeNames[themeMode]) {
-            themeMode = (themeMode + 1) % 3
-            putPref("theme", themeMode)
-            render()
-        })
-        root.addView(r1)
-
-        val r2 = newLine()
-        r2.addView(tile("Key height\n" + heightNames[heightSet]) {
-            heightSet = (heightSet + 1) % 3
-            putPref("height", heightSet)
-            render()
-        })
-        r2.addView(tile("Vibration\n" + (if (haptic) "On" else "Off")) {
-            haptic = !haptic
-            putPref("haptic", if (haptic) 1 else 0)
-            render()
-        })
-        r2.addView(tile("Key sound\n" + (if (sound) "On" else "Off")) {
-            sound = !sound
-            putPref("sound", if (sound) 1 else 0)
-            render()
-        })
-        root.addView(r2)
-    }
-
-    // ---------- Settings ----------
-    private fun renderSettings() {
-        root.addView(panelHeader("Settings"))
-
-        val scroll = scrollBox()
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        fun row(title: String, opts: List<String>, sel: Int, pick: (Int) -> Unit) {
-            col.addView(TextView(this).apply {
-                text = title
-                textSize = 13f
-                setTextColor(textCol())
-                setPadding(dp(6), dp(8), 0, 0)
-            })
-            val line = newLine()
-            for ((i, o) in opts.withIndex()) {
-                line.addView(key(o, 1f, fn = i != sel, accent = i == sel, hDp = 38, sp = 14f) { pick(i) })
-            }
-            col.addView(line)
-        }
-
-        row("Theme", listOf("Auto", "Light", "Dark"), themeMode) {
-            themeMode = it
-            putPref("theme", it)
-            render()
-        }
-        row("Key height", listOf("Small", "Medium", "Large"), heightSet) {
-            heightSet = it
-            putPref("height", it)
-            render()
-        }
-        row("Vibration", listOf("On", "Off"), if (haptic) 0 else 1) {
-            haptic = it == 0
-            putPref("haptic", if (haptic) 1 else 0)
-            render()
-        }
-        row("Key sound", listOf("On", "Off"), if (sound) 0 else 1) {
-            sound = it == 0
-            putPref("sound", if (sound) 1 else 0)
-            render()
-        }
-        row("Word suggestions", listOf("On", "Off"), if (suggestOn) 0 else 1) {
-            suggestOn = it == 0
-            putPref("suggest", if (suggestOn) 1 else 0)
-            render()
-        }
-        row("One-handed mode", listOf("Off", "Left", "Right"), oneHand) {
-            oneHand = it
-            putPref("onehand", it)
-            render()
-        }
-        row("Clipboard history", listOf("On", "Off"), if (clipOn) 0 else 1) {
-            clipOn = it == 0
-            putPref("cliphist", if (clipOn) 1 else 0)
-            render()
-        }
-        row("Auto-delete clips", listOf("Never", "1 day", "7 days", "30 days"), clipExpire) {
-            clipExpire = it
-            putPref("clipexp", it)
-            pruneClips()
-            render()
-        }
-
-        col.addView(TextView(this).apply {
-            text = "Clear data"
-            textSize = 13f
-            setTextColor(textCol())
-            setPadding(dp(6), dp(8), 0, 0)
-        })
-        val reset = newLine()
-        reset.addView(key("Clear learned words", 1f, fn = true, hDp = 38, sp = 13f) {
-            learned.clear()
-            learnedLoaded = true
-            bigrams.clear()
-            bigramsLoaded = true
-            getSharedPreferences("kb", MODE_PRIVATE).edit().remove("words").remove("bigrams").apply()
-            render()
-        })
-        reset.addView(key("Clear clipboard", 1f, fn = true, hDp = 38, sp = 13f) {
-            clips.clear()
-            saveClips()
-            render()
-        })
-        col.addView(reset)
-
-        scroll.addView(col)
-        root.addView(scroll)
-    }
-
-    // ---------- Letter keyboards ----------
-    private fun renderEnglish() {
-        for ((i, r) in enRows.withIndex()) {
-            val line = newLine()
-            if (i == 2) line.addView(spacer(0.5f))
-            if (i == 3) line.addView(shiftKey())
-            for (k in r.split(" ")) {
-                val t = if (shift && i > 0) k.uppercase() else k
-                line.addView(key(t, preview = true) { type(t) })
-            }
-            if (i == 2) line.addView(spacer(0.5f))
-            if (i == 3) line.addView(backKey(1.5f))
-            root.addView(line)
-        }
-    }
-
-    private fun renderBangla() {
-        // প্রসঙ্গনির্ভর: ব্যঞ্জনের পর কার (পেজ ১), নইলে স্বরবর্ণ (পেজ ০)
-        bnCtx = bnPage == 0 && afterConsonant()
-        val pg = if (bnCtx) 1 else bnPage
-        val left = bnLeft[pg]
-        var line = newLine()
-        line.addView(key("০-|", fn = true) {
-            bnPage = (pg + 1) % bnLeft.size
-            render()
-        })
-        addKeys(line, left[0], true)
-        addKeys(line, bnRight[0])
-        root.addView(line)
-
-        for (i in 1..2) {
-            line = newLine()
-            addKeys(line, left[i], true)
-            addKeys(line, bnRight[i])
-            root.addView(line)
-        }
-
-        line = newLine()
-        addKeys(line, bnRight[3])
-        root.addView(line)
-
-        line = newLine()
-        addKeys(line, bnRight[4])
-        line.addView(backKey(2f))
-        root.addView(line)
-    }
-
-    private fun renderSymbols() {
-        val rows = (if (lang == 1) bnSym else enSym)[mode - 1]
-        for (i in 0..2) {
-            val line = newLine()
-            addKeys(line, rows[i])
-            root.addView(line)
-        }
-        val line = newLine()
-        line.addView(key(if (mode == 1) "1/2" else "2/2", 1.5f, fn = true) {
-            mode = if (mode == 1) 2 else 1
-            render()
-        })
-        addKeys(line, rows[3])
-        line.addView(backKey(1.5f))
-        root.addView(line)
-    }
-
-    private fun bottomRow(): LinearLayout {
-        val line = newLine()
-        if (mode != 0) {
-            line.addView(key(if (lang == 1) "কখগ" else "ABC", 1.5f, fn = true) {
-                mode = 0
-                render()
-            })
-        } else {
-            line.addView(key("!#1", 1.5f, fn = true) {
-                mode = 1
-                render()
-            })
-        }
-        line.addView(key(",", preview = true) { type(",") })
-        val spaceLabel = "◂  " + langName(lang) + "  ▸"
-        val sk = key(spaceLabel, 5f, onSwipe = { toggleLang() }) { type(" ") }
-        spaceKey = sk
-        line.addView(sk)
-        line.addView(key(if (lang == 0) "." else "।", preview = true) { type(if (lang == 0) "." else "।") })
-        if (panel == 6) {
-            line.addView(fnIcon(21, 1.5f) { })
-        } else {
-            line.addView(key("↵", 1.5f, fn = true) { enter() })
-        }
-        return line
-    }
-
-    private fun toggleLang() {
-        if (panel == 6) return
-        lang = if (lang == 0) 1 else 0
-        mode = 0
-        shift = false
-        caps = false
-        render()
-    }
-
-    private fun shiftKey(): Button =
-        key(if (caps) "⇪" else "⇧", 1.5f, fn = true, accent = shift) {
-            val now = SystemClock.uptimeMillis()
-            when {
-                caps -> {
-                    caps = false
-                    shift = false
-                }
-                now - lastShiftTap < 400 -> {
-                    caps = true
-                    shift = true
-                }
-                else -> shift = !shift
-            }
-            lastShiftTap = now
-            render()
-        }
-
-    private fun backKey(w: Float): Button =
-        key("⌫", w, fn = true, repeat = true, onHold = { backspaceHold(it) }) { backspace() }
-
-    private fun addKeys(line: LinearLayout, spec: String, marks: Boolean = false) {
-        for (tok in spec.split(" ")) {
-            val i = tok.indexOf('|')
-            val commit = if (i > 0) tok.substring(i + 1) else tok
-            var label = if (i > 0) tok.substring(0, i) else tok
-            if (marks && i <= 0 && label[0] in "ািীুূৃেৈোৌ্ংঃঁ") label = "◌" + label
-            line.addView(key(label, preview = true) { type(commit) })
-        }
-    }
-
-    // ================= Typing =================
-    private fun isBoundary(s: String) =
-        s.isNotEmpty() && !(s[0].isLetter() || s[0] in '\u0980'..'\u09FF')
-
-    private fun type(s: String) {
-        if (panel == 6) {
-            searchType(s)
-            return
-        }
-        val ic = currentInputConnection ?: return
-        if (isBoundary(s)) learnCurrent()
-        ic.commitText(s, 1)
-        barMode = 2
-        barManual = false
-        if (shift && !caps) {
-            shift = false
-            render()
-        } else {
-            refreshSuggestions()
-        }
-    }
-
-    private fun backspace() {
-        if (panel == 6) {
-            if (searchQ.isNotEmpty()) searchQ.setLength(searchQ.length - 1)
-            updateSearchUi()
-            return
-        }
-        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
-        refreshSuggestions()
-    }
-
-    // ব্যাকস্পেস চেপে ধরলে ধীরে ধীরে গতি বাড়ে:
-    // ১.৫ সেকেন্ডের পর একেকবারে একটা শব্দ, ২.৫ সেকেন্ডের পর একেকবারে তিনটা শব্দ মোছে
-    private fun backspaceHold(held: Long) {
-        if (panel == 6 || held < 1500L) {
-            backspace()
-            return
-        }
-        val ic = currentInputConnection ?: return
-        val sel = ic.getSelectedText(0)
-        if (sel != null && sel.isNotEmpty()) {
-            backspace()
-            return
-        }
-        val words = if (held > 2500L) 3 else 1
-        for (n in 1..words) {
-            val b = ic.getTextBeforeCursor(40, 0) ?: break
-            if (b.isEmpty()) break
-            var i = b.length
-            while (i > 0 && b[i - 1].isWhitespace()) i--
-            while (i > 0 && !b[i - 1].isWhitespace()) i--
-            ic.deleteSurroundingText(b.length - i, 0)
-        }
-        refreshSuggestions()
-    }
-
-    // বাংলা: ব্যঞ্জনের আগে/পরে বদলালে বাম দিকের স্বর/কার অংশ আবার আঁকা হয়
-    private fun syncBnContext() {
-        if (!::root.isInitialized) return
-        if (lang == 1 && panel == 0 && mode == 0 && bnPage == 0 && afterConsonant() != bnCtx) render()
-    }
-
-    private fun enter() {
-        learnCurrent()
-        if (!sendDefaultEditorAction(true)) {
-            sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
-        }
-        refreshSuggestions()
-    }
-
-    private fun newLine() = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-        layoutParams = LinearLayout.LayoutParams(MP, WC)
-    }
-
-    private fun spacer(w: Float, hDp: Int = 0) = View(this).apply {
-        layoutParams = LinearLayout.LayoutParams(0, dp(if (hDp > 0) hDp else keyH()), w)
-    }
-
-    private fun bg(color: Int): StateListDrawable {
-        fun shape(c: Int) = GradientDrawable().apply {
-            cornerRadius = dp(8).toFloat()
-            setColor(c)
-        }
-        return StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), shape(pressBg()))
-            addState(intArrayOf(), shape(color))
-        }
-    }
-
-    private fun key(
-        label: String,
-        weight: Float = 1f,
-        fn: Boolean = false,
-        accent: Boolean = false,
-        repeat: Boolean = false,
-        flat: Boolean = false,
-        preview: Boolean = false,
-        hDp: Int = 0,
-        sp: Float = 0f,
-        onSwipe: ((Int) -> Unit)? = null,
-        onHold: ((Long) -> Unit)? = null,
-        onTap: () -> Unit
-    ): Button = Button(this).apply {
-        val h = if (hDp > 0) hDp else keyH()
-        text = label
-        isAllCaps = false
-        textSize = if (sp > 0f) sp else when {
-            label.length <= 1 -> 20f
-            label.length <= 3 -> 17f
-            else -> 14f
-        }
-        setTextColor(if (accent) 0xFF2F7CF6.toInt() else textCol())
-        background = bg(if (flat) 0 else if (fn) fnBg() else keyBg())
-        stateListAnimator = null
-        minWidth = 0
-        minimumWidth = 0
-        minHeight = 0
-        minimumHeight = 0
-        setPadding(0, 0, 0, 0)
-        layoutParams = LinearLayout.LayoutParams(0, dp(h), weight).apply {
-            setMargins(dp(2), dp(3), dp(2), dp(3))
-        }
-        if (repeat) {
-            val btn = this
-            var downAt = 0L
-            val r = object : Runnable {
-                override fun run() {
-                    if (!btn.isAttachedToWindow) {
-                        if (onHold != null) backHeld = false
-                        return
-                    }
-                    val held = SystemClock.uptimeMillis() - downAt
-                    if (onHold != null) onHold(held) else onTap()
-                    val gap = if (onHold == null) 45L else if (held < 700L) 45L else if (held < 1500L) 25L else 35L
-                    uiHandler.postDelayed(this, gap)
-                }
-            }
-            setOnTouchListener { v, e ->
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        v.isPressed = true
-                        downAt = SystemClock.uptimeMillis()
-                        if (onHold != null) backHeld = true
-                        feedback(v)
-                        onTap()
-                        uiHandler.postDelayed(r, 400)
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        v.isPressed = false
-                        uiHandler.removeCallbacks(r)
-                        if (onHold != null) {
-                            backHeld = false
-                            uiHandler.post { syncBnContext() }
-                        }
-                    }
-                }
-                true
-            }
-        } else if (onSwipe != null) {
-            var downX = 0f
-            var swiped = false
-            var dir = 1
-            setOnTouchListener { v, e ->
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        downX = e.x
-                        swiped = false
-                        v.isPressed = true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val far = Math.abs(e.x - downX) > dp(14)
-                        if (far && !swiped) {
-                            swiped = true
-                            dir = if (e.x > downX) 1 else -1
-                            if (panel != 6) showLangPopup(v, dir, langName(1 - lang))
-                        } else if (!far && swiped) {
-                            swiped = false
-                            hideLangPopup()
-                        }
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        v.isPressed = false
-                        if (swiped) {
-                            hideLangPopup()
-                            feedback(v)
-                            onSwipe(dir)
-                            if (panel != 6) flashLangPopup()
-                        } else {
-                            feedback(v)
-                            onTap()
-                        }
-                    }
-                    MotionEvent.ACTION_CANCEL -> {
-                        v.isPressed = false
-                        hideLangPopup()
-                    }
-                }
-                true
-            }
-        } else if (preview) {
-            previewKeys.add(this)
-            tag = PreviewInfo(label, onTap)
-            setOnTouchListener { v, e ->
-                handlePreviewTouch(v, e)
-                true
-            }
-        } else {
-            setOnClickListener {
-                feedback(it)
-                onTap()
-            }
-        }
-    }
-
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-}
+      
