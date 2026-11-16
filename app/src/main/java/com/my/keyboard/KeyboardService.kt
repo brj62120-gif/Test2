@@ -46,6 +46,7 @@ class KeyboardService : InputMethodService() {
     private var lastShiftTap = 0L
     private var mode = 0 // 0 = অক্ষর, 1 = symbol 1/2, 2 = symbol 2/2
     private var bnPage = 0
+    private var bnCtx = false // true = ব্যঞ্জনের পর, কার দেখানো হচ্ছে
     private var dark = false
     // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more, 6 = emoji search
     private var panel = 0
@@ -644,6 +645,15 @@ class KeyboardService : InputMethodService() {
 
     private fun isWordChar(c: Char) = c.isLetter() || c in '\u0980'..'\u09FF' || c == '\''
 
+    // ব্যঞ্জনবর্ণের পর কার বসে: ক-হ, নুক্তা, ড় ঢ় য়
+    private fun afterConsonant(): Boolean {
+        val b = currentInputConnection?.getTextBeforeCursor(1, 0) ?: return false
+        if (b.isEmpty()) return false
+        val c = b[0]
+        return c in '\u0995'..'\u09B9' || c == '\u09BC' ||
+            c == '\u09DC' || c == '\u09DD' || c == '\u09DF'
+    }
+
     private fun isPassword(): Boolean {
         val t = currentInputEditorInfo?.inputType ?: return false
         val cls = t and InputType.TYPE_MASK_CLASS
@@ -1233,7 +1243,11 @@ class KeyboardService : InputMethodService() {
         super.onUpdateSelection(
             oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
         )
-        if (::root.isInitialized) refreshSuggestions()
+        if (::root.isInitialized) {
+            refreshSuggestions()
+            // বাংলা: ব্যঞ্জনের আগে/পরে বদলালে বাম দিকের স্বর/কার অংশ আবার আঁকা হবে
+            if (lang == 1 && panel == 0 && mode == 0 && bnPage == 0 && afterConsonant() != bnCtx) render()
+        }
     }
 
     // ================= UI =================
@@ -2078,10 +2092,13 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun renderBangla() {
-        val left = bnLeft[bnPage]
+        // প্রসঙ্গনির্ভর: ব্যঞ্জনের পর কার (পেজ ১), নইলে স্বরবর্ণ (পেজ ০)
+        bnCtx = bnPage == 0 && afterConsonant()
+        val pg = if (bnCtx) 1 else bnPage
+        val left = bnLeft[pg]
         var line = newLine()
         line.addView(key("০-|", fn = true) {
-            bnPage = (bnPage + 1) % bnLeft.size
+            bnPage = (pg + 1) % bnLeft.size
             render()
         })
         addKeys(line, left[0], true)
