@@ -47,6 +47,7 @@ class KeyboardService : InputMethodService() {
     private var mode = 0 // 0 = অক্ষর, 1 = symbol 1/2, 2 = symbol 2/2
     private var bnPage = 0
     private var bnCtx = false // true = ব্যঞ্জনের পর, কার দেখানো হচ্ছে
+    private var backHeld = false // ব্যাকস্পেস চেপে ধরা থাকলে লেআউট আঁকা বন্ধ রাখা হয়
     private var dark = false
     // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more, 6 = emoji search
     private var panel = 0
@@ -1151,10 +1152,19 @@ class KeyboardService : InputMethodService() {
     private fun pressBg() = if (dark) 0xFF5A5A5A.toInt() else 0xFFB5B5B5.toInt()
     private fun textCol() = if (dark) 0xFFF2F2F2.toInt() else 0xFF1A1A1A.toInt()
 
-    private fun keyH() = when (heightSet) {
+    private fun baseKeyH() = when (heightSet) {
         0 -> 42
         2 -> 54
         else -> 48
+    }
+
+    // বাংলা অক্ষর কিবোর্ডে ৬ সারি, ইংরেজি ও সিম্বলে ৫ সারি।
+    // তাই ইংরেজি/সিম্বলের প্রতিটি সারি একটু লম্বা, যাতে মোট উচ্চতা বাংলার সমান হয়।
+    private fun keyH(): Int {
+        val b = baseKeyH()
+        val letterPanel = panel == 0 || panel == 6
+        val bangla = lang == 1 && mode == 0
+        return if (letterPanel && !bangla) Math.round((b + 6) * 6f / 5f) - 6 else b
     }
 
     private fun putPref(k: String, v: Int) {
@@ -1246,7 +1256,7 @@ class KeyboardService : InputMethodService() {
         if (::root.isInitialized) {
             refreshSuggestions()
             // বাংলা: ব্যঞ্জনের আগে/পরে বদলালে বাম দিকের স্বর/কার অংশ আবার আঁকা হবে
-            if (lang == 1 && panel == 0 && mode == 0 && bnPage == 0 && afterConsonant() != bnCtx) render()
+            if (!backHeld) syncBnContext()
         }
     }
 
@@ -1462,7 +1472,7 @@ class KeyboardService : InputMethodService() {
         emojiRipple = false
         hs.addView(inner)
         bar.addView(hs)
-        val bk = key("⌫", 1f, flat = true, repeat = true) { backspace() }
+        val bk = key("⌫", 1f, flat = true, repeat = true, onHold = { backspaceHold(it) }) { backspace() }
         bk.layoutParams = LinearLayout.LayoutParams(dp(54), dp(46))
         bar.addView(bk)
         return bar
@@ -2194,7 +2204,7 @@ class KeyboardService : InputMethodService() {
         }
 
     private fun backKey(w: Float): Button =
-        key("⌫", w, fn = true, repeat = true) { backspace() }
+        key("⌫", w, fn = true, repeat = true, onHold = { backspaceHold(it) }) { backspace() }
 
     private fun addKeys(line: LinearLayout, spec: String, marks: Boolean = false) {
         for (tok in spec.split(" ")) {
@@ -2238,6 +2248,37 @@ class KeyboardService : InputMethodService() {
         refreshSuggestions()
     }
 
+    // ব্যাকস্পেস চেপে ধরলে ধীরে ধীরে গতি বাড়ে:
+    // ১.৫ সেকেন্ডের পর একেকবারে একটা শব্দ, ২.৫ সেকেন্ডের পর একেকবারে তিনটা শব্দ মোছে
+    private fun backspaceHold(held: Long) {
+        if (panel == 6 || held < 1500L) {
+            backspace()
+            return
+        }
+        val ic = currentInputConnection ?: return
+        val sel = ic.getSelectedText(0)
+        if (sel != null && sel.isNotEmpty()) {
+            backspace()
+            return
+        }
+        val words = if (held > 2500L) 3 else 1
+        for (n in 1..words) {
+            val b = ic.getTextBeforeCursor(40, 0) ?: break
+            if (b.isEmpty()) break
+            var i = b.length
+            while (i > 0 && b[i - 1].isWhitespace()) i--
+            while (i > 0 && !b[i - 1].isWhitespace()) i--
+            ic.deleteSurroundingText(b.length - i, 0)
+        }
+        refreshSuggestions()
+    }
+
+    // বাংলা: ব্যঞ্জনের আগে/পরে বদলালে বাম দিকের স্বর/কার অংশ আবার আঁকা হয়
+    private fun syncBnContext() {
+        if (!::root.isInitialized) return
+        if (lang == 1 && panel == 0 && mode == 0 && bnPage == 0 && afterConsonant() != bnCtx) render()
+    }
+
     private fun enter() {
         learnCurrent()
         if (!sendDefaultEditorAction(true)) {
@@ -2278,6 +2319,7 @@ class KeyboardService : InputMethodService() {
         hDp: Int = 0,
         sp: Float = 0f,
         onSwipe: ((Int) -> Unit)? = null,
+        onHold: ((Long) -> Unit)? = null,
         onTap: () -> Unit
     ): Button = Button(this).apply {
         val h = if (hDp > 0) hDp else keyH()
@@ -2300,16 +2342,26 @@ class KeyboardService : InputMethodService() {
             setMargins(dp(2), dp(3), dp(2), dp(3))
         }
         if (repeat) {
+            val btn = this
+            var downAt = 0L
             val r = object : Runnable {
                 override fun run() {
-                    onTap()
-                    uiHandler.postDelayed(this, 45)
+                    if (!btn.isAttachedToWindow) {
+                        if (onHold != null) backHeld = false
+                        return
+                    }
+                    val held = SystemClock.uptimeMillis() - downAt
+                    if (onHold != null) onHold(held) else onTap()
+                    val gap = if (onHold == null) 45L else if (held < 700L) 45L else if (held < 1500L) 25L else 35L
+                    uiHandler.postDelayed(this, gap)
                 }
             }
             setOnTouchListener { v, e ->
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
                         v.isPressed = true
+                        downAt = SystemClock.uptimeMillis()
+                        if (onHold != null) backHeld = true
                         feedback(v)
                         onTap()
                         uiHandler.postDelayed(r, 400)
@@ -2317,6 +2369,10 @@ class KeyboardService : InputMethodService() {
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         v.isPressed = false
                         uiHandler.removeCallbacks(r)
+                        if (onHold != null) {
+                            backHeld = false
+                            uiHandler.post { syncBnContext() }
+                        }
                     }
                 }
                 true
