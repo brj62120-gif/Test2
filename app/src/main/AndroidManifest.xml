@@ -14,3 +14,5 @@
         </service>
     </application>
 </manifest>
+android:icon="@drawable/ic_launcher"
+android:roundIcon="@drawable/ic_launcher_round"
