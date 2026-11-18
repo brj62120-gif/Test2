@@ -1,9 +1,41 @@
 package com.my.keyboard
 
+import android.content.Context
+
 // শব্দভান্ডার: প্রতিটি তালিকা ব্যবহারের হার (frequency) অনুযায়ী সাজানো — আগের শব্দ বেশি প্রচলিত।
-// JVM এর string constant সীমা (৬৫৫৩৫ বাইট) এড়াতে শব্দগুলো ছোট ছোট টুকরায় জোড়া হয়েছে।
+// বড় তালিকা assets এ; এই ফাইলে শুধু ছোট fallback তালিকা, contractions আর next-word পরামর্শ আছে।
 object WordData {
-    val en: List<String> by lazy {
+    // বড় শব্দতালিকা app/src/main/assets/ ফোল্ডারে থাকে (words_en.txt, words_bn.txt — প্রতি লাইনে একটা শব্দ,
+    // বেশি প্রচলিত শব্দ আগে)। লোড হওয়ার আগে নিচের ছোট built-in তালিকা ব্যবহার হয়, তাই কিবোর্ড কখনো খালি থাকে না।
+    @Volatile private var enLoaded: List<String>? = null
+    @Volatile private var bnLoaded: List<String>? = null
+
+    val en: List<String> get() = enLoaded ?: enBuiltIn
+    val bn: List<String> get() = bnLoaded ?: bnBuiltIn
+
+    /** KeyboardService.onCreate() এ একবার ডাকুন। ব্যাকগ্রাউন্ড থ্রেডে লোড হয়; শেষ হলে onLoaded মূল থ্রেডের বাইরেই চলে। */
+    fun loadAsync(context: Context, onLoaded: (() -> Unit)? = null) {
+        if (enLoaded != null && bnLoaded != null) { onLoaded?.invoke(); return }
+        val app = context.applicationContext
+        Thread {
+            try {
+                val e = readLines(app, "words_en.txt")
+                val b = readLines(app, "words_bn.txt")
+                if (e.isNotEmpty()) enLoaded = e
+                if (b.isNotEmpty()) bnLoaded = b
+                onLoaded?.invoke()
+            } catch (_: Exception) {
+                // ফাইল না পেলে built-in তালিকাই চলবে
+            }
+        }.start()
+    }
+
+    private fun readLines(context: Context, name: String): List<String> =
+        context.assets.open(name).bufferedReader(Charsets.UTF_8).useLines { seq ->
+            seq.map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
+        }
+
+    private val enBuiltIn: List<String> by lazy {
         val sb = StringBuilder()
         sb.append("i the be to of and a in that have it for not on with he as you do at this but his by from they we say her she or an will my one all would there their what so up out if about who get which go me when make can like time no just him know take people into year your good some could them see other than then now look only come its over think also back after use two how our work first well way even new want because any these give day most us is are was were been has had did does am being having doing said says went gone going got getting ")
         sb.append("made making took taken taking came coming saw seen seeing knew known knowing thought thinking told telling asked asking felt feeling found finding left leaving kept keeping let began begun begin seemed seem helped help showed show heard hearing played playing ran running moved moving lived living believed bring brought happen happened write wrote written writing provide sit sat stand stood lose lost pay paid meet met include included continue set learn learned change led lead understand watch follow stop create spoke speak read allow add spend grow opened open walk win offer remember love consider appear buy wait serve die send expect build stay fall cut reach kill remain hello hi hey thanks thank please sorry okay ok yes ")
@@ -48,6 +80,9 @@ object WordData {
         sb.append("dms smh bff irl wfh eta rsvp apu vaiya dost ")
         sb.append("lmao rofl bruh hbd bday gnight wtf ikr fr ngl jk earphone headphone earbuds outlook teams pinterest biryani kacchi tehari khichuri paratha roti naan curry dal mutton sharbat halim kebab chowmein chips almond eggplant worldcup olympic fifa ipl bpl fasting tarabih tahajjud khutbah azan wudu covid corona mask sanitizer lockdown quarantine pandemic caption podcast blogger vlogger youtuber influencer wireless broadband tethering symptom diagnosis cholesterol asthma seatbelt flyover supervisor hired fired ")
         sb.append("applicant recruitment bangladeshi bengali bangla english hindi urdu arabic chinese japanese korean french german spanish italian russian turkish ")
+        sb.append("background foreground examples instances samples template templates theme themes wallpaper wallpapers layouts designs refresh reload downgrade versions beta preview demo signin avatar contacts groups channels chats outbox drafts unread reels posts subscribers unsubscribe alerts reminders alarms photos pictures albums videos recorded playlist roaming server servers folders files documents attachments uploading tab tabs bookmark bookmarks cache links url filters categories tags ")
+        sb.append("labels keyword keywords undo redo removed rename submit denied permissions enabled disable disabled toggle preferences default customize advanced passcode biometric unlock locked unlocked verify verified verification otp authentication accounts payments transactions withdrawal bills prices offers coupon voucher cart checkout orders shipping returns warranty brands products items sizes colors meetings reports emails spam projects tasks deadlines goals targets leadership employees colleagues ")
+        sb.append("clients customers vendor supplier partners expenses taxes loans savings teachers classes lessons assignments grades subjects courses medicines tablets symptoms drinks tickets humidity matches players movies episodes holidays impressive annoying confusing disappointing frustrating whichever unavailable required optional recommended suggested latest ")
         sb.toString().split(" ").filter { it.isNotEmpty() }.distinct()
     }
 
@@ -59,7 +94,7 @@ object WordData {
         sb.toString().split(" ").filter { it.isNotEmpty() }.distinct()
     }
 
-    val bn: List<String> by lazy {
+    private val bnBuiltIn: List<String> by lazy {
         val sb = StringBuilder()
         sb.append("আমি তুমি আপনি সে আমরা তোমরা তারা এই ওই এটা ওটা সেটা এখানে ওখানে সেখানে কি কী কেন কোথায় কখন কেমন কত কে কাকে কার কোন কোনো কীভাবে কিভাবে না হ্যাঁ জি ঠিক আছে আছি আছো আছেন ছিল ছিলাম ছিলে ছিলেন ছিলো আমার আমাকে আমাদের আমাদেরকে তোমার তোমাকে তোমাদের তোমাদেরকে আপনার আপনাকে আপনাদের আপনাদেরকে তার তাকে তাদের তাদেরকে তাঁর তাঁকে তাঁদের এর এদের ওর ওকে ওদের নিজের নিজে নিজেকে করি করো করেন করে করা করছি করছো করছেন করছে করলাম করলে করলেন করল করলো করবো করব করবে করবেন করতে করেছি করেছো করেছেন করেছে করেছিলাম করেছিল করতাম করতেন করুন করিস হই হও হন হয় হয়ে হওয়া হচ্ছি হচ্ছো হচ্ছেন হচ্ছে হলাম হলে হলেন হল হলো হবো হব হবে হবেন হতে হয়েছি হয়েছো ")
         sb.append("হয়েছেন হয়েছে হয়েছিল হোক হতো হত যাই যাও যান যায় গিয়ে যাওয়া যাচ্ছি যাচ্ছো যাচ্ছেন যাচ্ছে গেলাম গেলে গেলেন গেল গেলো যাবো যাব যাবে যাবেন যেতে গিয়েছি গিয়েছো গিয়েছেন গিয়েছে গিয়েছিল আসি আসো আসেন আসে এসে আসা আসছি আসছো আসছেন আসছে এলাম এলে এলেন এল এলো আসবো আসব আসবে আসবেন আসতে এসেছি এসেছো এসেছেন এসেছে এসেছিল বলি বলো বলেন বলে বলা বলছি বলছো বলছেন বলছে বললাম বললে বললেন বলল বললো বলবো বলব বলবে বলবেন বলতে বলেছি বলেছো বলেছেন বলেছে বলেছিল বলুন দেখি দেখো দেখেন দেখে দেখা দেখছি দেখছো দেখছেন দেখছে দেখলাম দেখলে দেখলেন দেখল দেখলো দেখবো দেখব দেখবে দেখবেন দেখতে দেখেছি দেখেছো দেখেছেন দেখেছে দেখুন খাই খাও খান খায় খেয়ে খাওয়া খাচ্ছি খাচ্ছো খাচ্ছেন খাচ্ছে খেলাম খেলে খেলেন খেল খেলো ")
@@ -106,6 +141,8 @@ object WordData {
         sb.append("বাঁচছো বাঁচছেন বাঁচছে বাঁচলাম বাঁচলে বাঁচলেন বাঁচল বাঁচলো বাঁচবো বাঁচবে বাঁচবেন বাঁচতে বাঁচতাম বাঁচতো বাঁচতেন বাঁচেছি বাঁচেছো বাঁচেছেন বাঁচেছে বাঁচো বাঁচুন বাঁচা আঁকছি আঁকছো আঁকছেন আঁকছে আঁকলাম আঁকলে আঁকলেন আঁকল আঁকলো আঁকবো আঁকবে আঁকবেন আঁকতে আঁকতাম আঁকতো আঁকতেন আঁকেছি আঁকেছো আঁকেছেন আঁকেছে আঁকো আঁকুন চাপছি চাপছো চাপছেন চাপছে চাপলাম চাপলে চাপলেন চাপল চাপলো চাপবো চাপবে চাপবেন চাপতে চাপতাম চাপতো চাপতেন চাপেছি চাপেছো চাপেছেন চাপেছে চাপো চাপুন চাপা ডুবছি ডুবছো ডুবছেন ")
         sb.append("ডুবছে ডুবলাম ডুবলে ডুবলেন ডুবল ডুবলো ডুববো ডুববে ডুববেন ডুবতে ডুবতাম ডুবতো ডুবতেন ডুবেছি ডুবেছো ডুবেছেন ডুবেছে ডুবো ডুবুন ডুবা ভাসছি ভাসছো ভাসছেন ভাসছে ভাসলাম ভাসলে ভাসলেন ভাসল ভাসলো ভাসবো ভাসবে ভাসবেন ভাসতে ভাসতাম ভাসতো ভাসতেন ভাসেছি ভাসেছো ভাসেছেন ভাসেছে ভাসো ভাসুন ভাসা ওড়ছি ওড়ছো ওড়ছেন ওড়ছে ওড়লাম ওড়লে ওড়লেন ওড়ল ওড়লো ওড়বো ওড়বে ওড়বেন ওড়তে ওড়তাম ওড়তো ওড়তেন ওড়েছি ওড়েছো ওড়েছেন ওড়েছে ওড়ো ওড়ুন ওড়া ভরছো ভরছেন ভরছে ভরলাম ")
         sb.append("ভরলে ভরলেন ভরল ভরলো ভরবো ভরবে ভরবেন ভরতে ভরতাম ভরতো ভরতেন ভরেছি ভরেছো ভরেছেন ভরেছে ভরো ভরুন খাটছি খাটছো খাটছেন খাটছে খাটলাম খাটলে খাটলেন খাটল খাটলো খাটবো খাটবে খাটবেন খাটতে খাটতাম খাটতো খাটতেন খাটেছি খাটেছো খাটেছেন খাটেছে খাটুন খাটা ")
+        sb.append("ব্যাকগ্রাউন্ড নমুনা ওয়ালপেপার লেআউট ডিজাইন রিফ্রেশ আপগ্রেড ভার্সন ডেমো ট্রায়াল রেজিস্টার ইউজারনেম পিন আনলক লক ভেরিফাই কোড ওটিপি কন্টাক্ট মেসেজে ইমেইলে অ্যালার্ম রিমাইন্ডার শিডিউল ছবিতে গ্যালারি রেকর্ড মিউজিক প্লেলিস্ট ডেটা সার্ভার ক্লাউড স্টোরেজ মেমোরি ডকুমেন্ট বুকমার্ক ফিল্টার কপি পেস্ট কাট সিলেক্ট ডিলিট রিনেম এডিট সেভ ক্যানসেল সাবমিট অ্যাপ্লাই অ্যাকসেপ্ট রিজেক্ট পারমিশন অপশন ডিফল্ট কাস্টম প্রাইভেসি সিকিউরিটি ট্রানজ্যাকশন ট্রান্সফার ডিপোজিট রিফান্ড ")
+        sb.append("রসিদ কুপন ভাউচার কুরিয়ার ট্র্যাকিং রিটার্ন এক্সচেঞ্জ ওয়ারেন্টি ব্র্যান্ড প্রোডাক্ট সাইজ কনফারেন্স প্রেজেন্টেশন টাস্ক ডেডলাইন অগ্রগতি স্টাফ ক্লায়েন্ট কাস্টমার সরবরাহকারী অংশীদার বাজেট ট্যাক্স বিমা গরুর পার্কিং অবিশ্বাস্য বিরক্তিকর বিভ্রান্তিকর আকর্ষণীয় যাইহোক ইতিমধ্যে অন্যথায় যাহোক যেকোনো যখনই যেখানেই যেই স্পষ্টত সত্যিই উপলব্ধ ঐচ্ছিক সুপারিশ সর্বশেষ সাম্প্রতিক ")
         sb.toString().split(" ").filter { it.isNotEmpty() }.distinct()
     }
 
