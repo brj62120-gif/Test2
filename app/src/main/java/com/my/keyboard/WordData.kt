@@ -21,8 +21,9 @@ object WordData {
             try {
                 val e = readLines(app, "words_en.txt")
                 val b = readLines(app, "words_bn.txt")
-                if (e.isNotEmpty()) enLoaded = e
-                if (b.isNotEmpty()) bnLoaded = b
+                // index আগে বানাই, তারপর তালিকা প্রকাশ করি — যাতে অর্ধেক-তৈরি অবস্থা কেউ না দেখে
+                if (e.isNotEmpty()) { enIndex = PrefixIndex(e); enLoaded = e }
+                if (b.isNotEmpty()) { bnIndex = PrefixIndex(b); bnLoaded = b }
                 onLoaded?.invoke()
             } catch (_: Exception) {
                 // ফাইল না পেলে built-in তালিকাই চলবে
@@ -34,6 +35,84 @@ object WordData {
         context.assets.open(name).bufferedReader(Charsets.UTF_8).useLines { seq ->
             seq.map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
         }
+
+    @Volatile private var enIndex: PrefixIndex? = null
+    @Volatile private var bnIndex: PrefixIndex? = null
+    private val enBuiltInIndex by lazy { PrefixIndex(enBuiltIn) }
+    private val bnBuiltInIndex by lazy { PrefixIndex(bnBuiltIn) }
+
+    /** ইংরেজি সাজেশন: prefix দিয়ে শুরু হওয়া শব্দ, বেশি প্রচলিত (তালিকায় আগের) শব্দ আগে। */
+    fun suggestEn(prefix: String, limit: Int = 3): List<String> =
+        (enIndex ?: enBuiltInIndex).suggestRanked(prefix.lowercase(), limit).map { it.first }
+
+    /** বাংলা সাজেশন: একই নিয়ম। */
+    fun suggestBn(prefix: String, limit: Int = 3): List<String> =
+        (bnIndex ?: bnBuiltInIndex).suggestRanked(prefix, limit).map { it.first }
+
+    /** (শব্দ, rank) জোড়া — rank = তালিকায় অবস্থান (ছোট = বেশি প্রচলিত)। স্কোর হিসাবের জন্য। */
+    fun rankedEn(prefix: String, limit: Int): List<Pair<String, Int>> =
+        (enIndex ?: enBuiltInIndex).suggestRanked(prefix, limit)
+
+    fun rankedBn(prefix: String, limit: Int): List<Pair<String, Int>> =
+        (bnIndex ?: bnBuiltInIndex).suggestRanked(prefix, limit)
+
+    /** শব্দটি তালিকায় আছে কি না (বাইনারি সার্চ, বাড়তি HashSet লাগে না)। */
+    fun containsEn(word: String): Boolean = (enIndex ?: enBuiltInIndex).contains(word)
+    fun containsBn(word: String): Boolean = (bnIndex ?: bnBuiltInIndex).contains(word)
+
+    /**
+     * বাইনারি সার্চ index: শব্দগুলো বর্ণানুক্রমে সাজানো অবস্থানের তালিকা (order) রাখে, আসল শব্দ/ক্রম বদলায় না।
+     * rank = মূল তালিকায় শব্দের অবস্থান (ছোট = বেশি প্রচলিত)।
+     */
+    internal class PrefixIndex(private val words: List<String>) {
+        private val order: IntArray =
+            words.indices.sortedWith { a, b -> words[a].compareTo(words[b]) }.toIntArray()
+
+        // word-এর চেয়ে ছোট নয় এমন প্রথম অবস্থান (~১৭ ধাপ)
+        private fun lowerBound(word: String): Int {
+            var lo = 0
+            var hi = order.size
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                if (words[order[mid]].compareTo(word) < 0) lo = mid + 1 else hi = mid
+            }
+            return lo
+        }
+
+        fun contains(word: String): Boolean {
+            val i = lowerBound(word)
+            return i < order.size && words[order[i]] == word
+        }
+
+        /** word-এর সঙ্গে হুবহু মিলে যাওয়া শব্দগুলোর মধ্যে সবচেয়ে ছোট rank; না থাকলে -১। */
+        fun lowestRankOf(word: String): Int {
+            var i = lowerBound(word)
+            var best = -1
+            while (i < order.size && words[order[i]] == word) {
+                val r = order[i]
+                if (best < 0 || r < best) best = r
+                i++
+            }
+            return best
+        }
+
+        /** prefix দিয়ে শুরু হওয়া শব্দগুলোর মধ্যে সবচেয়ে ছোট rank-এর limit টি, rank অনুযায়ী সাজানো। */
+        fun suggestRanked(prefix: String, limit: Int): List<Pair<String, Int>> {
+            if (limit <= 0) return emptyList()
+            if (prefix.isEmpty()) return words.take(limit).mapIndexed { i, w -> w to i }
+            // max-heap: সবচেয়ে বড় rank মাথায় থাকে, ভরে গেলে তা বাদ দিয়ে ছোটটা ঢোকে
+            val heap = java.util.PriorityQueue<Int>(limit + 1, java.util.Collections.reverseOrder())
+            var i = lowerBound(prefix)
+            while (i < order.size) {
+                val rank = order[i]
+                if (!words[rank].startsWith(prefix)) break
+                if (heap.size < limit) heap.add(rank)
+                else if (rank < heap.peek()!!) { heap.poll(); heap.add(rank) }
+                i++
+            }
+            return heap.sorted().map { words[it] to it }
+        }
+    }
 
     private val enBuiltIn: List<String> by lazy {
         val sb = StringBuilder()

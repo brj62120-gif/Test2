@@ -725,11 +725,14 @@ class KeyboardService : InputMethodService() {
 
     // ================= Dictionary & Suggestions =================
     // শব্দভান্ডার WordData.kt ফাইলে — প্রতিটি তালিকা ব্যবহারের হার অনুযায়ী সাজানো (আগের শব্দ বেশি প্রচলিত)
-    private val enList by lazy { WordData.en }
-    private val bnList by lazy { WordData.bn }
+    // বড় তালিকা ব্যাকগ্রাউন্ডে লোড হয়; getter দিয়ে সবসময় সর্বশেষ তালিকা নেওয়া হয় (lazy হলে ছোট তালিকায় আটকে যেত)
+    private val enList: List<String> get() = WordData.en
+    private val bnList: List<String> get() = WordData.bn
     private val contrList by lazy { WordData.contractions }
-    private val dict by lazy { enList + contrList + bnList }
-    private val dictSet by lazy { HashSet(dict) }
+    private val contrSet by lazy { HashSet(contrList) }
+
+    // শব্দটি অভিধানে আছে কি না — বাইনারি সার্চ, পুরো তালিকার HashSet লাগে না
+    private fun inDict(w: String) = WordData.containsEn(w) || WordData.containsBn(w) || contrSet.contains(w)
 
     private fun isWordChar(c: Char) = c.isLetter() || c in '\u0980'..'\u09FF' || c == '\''
 
@@ -900,9 +903,10 @@ class KeyboardService : InputMethodService() {
             if (old == null || s > old) score[w] = s
         }
 
-        for ((i, w) in enList.withIndex()) consider(w, 4000 - i)
+        // বাইনারি সার্চ: prefix-এ মেলা শব্দের মধ্যে সবচেয়ে প্রচলিত ৩০০টি (rank = তালিকায় অবস্থান)
+        for ((w, r) in WordData.rankedEn(lp, 300)) consider(w, 4000 - r)
         for ((i, w) in contrList.withIndex()) consider(w, 3000 - i)
-        for ((i, w) in bnList.withIndex()) consider(w, 4000 - i)
+        for ((w, r) in WordData.rankedBn(lp, 300)) consider(w, 4000 - r)
         for (e in learned.entries) {
             if (e.value >= 2) consider(e.key, 1800 + 110 * minOf(e.value, 12))
         }
@@ -939,25 +943,34 @@ class KeyboardService : InputMethodService() {
         return sb.toString()
     }
 
-    private val bnIndex: HashMap<String, String> by lazy {
-        val m = HashMap<String, String>()
-        for (w in bnList) {
-            val n = bnNorm(w)
-            if (!m.containsKey(n)) m[n] = w
-        }
-        m
+    // bnList-এর প্রতিটি শব্দের normalized রূপের index (একবার বানানো হয়, তালিকা বদলালে আবার)।
+    // rank = bnList-এ মূল শব্দের অবস্থান। লোড শেষে ব্যাকগ্রাউন্ডেই বানিয়ে রাখা হয় (onCreate দেখুন)।
+    @Volatile private var bnNormCache: Pair<List<String>, WordData.PrefixIndex>? = null
+
+    private fun bnNormIdx(): Pair<List<String>, WordData.PrefixIndex> {
+        val src = bnList
+        val c = bnNormCache
+        if (c != null && c.first === src) return c
+        val n = Pair(src, WordData.PrefixIndex(src.map { bnNorm(it) }))
+        bnNormCache = n
+        return n
     }
 
     private fun bnFuzzy(conv: String): List<String> {
         loadLearned()
         val nc = bnNorm(conv)
         if (nc.isEmpty()) return emptyList()
-        val pool = ArrayList<String>()
-        for (e in learned.entries.sortedByDescending { it.value }) pool.add(e.key)
-        pool.addAll(bnList)
         val out = LinkedHashSet<String>()
-        for (w in pool) {
+        // ১) নিজের শেখা শব্দ (বেশি ব্যবহার আগে)
+        for (e in learned.entries.sortedByDescending { it.value }) {
+            val w = e.key
             if (w != conv && w.isNotEmpty() && w[0] in '\u0980'..'\u09FF' && bnNorm(w).startsWith(nc)) out.add(w)
+        }
+        // ২) অভিধান: normalized index-এ বাইনারি সার্চ, সবচেয়ে প্রচলিত ২০০টি
+        val (src, idx) = bnNormIdx()
+        for ((_, r) in idx.suggestRanked(nc, 200)) {
+            val w = src[r]
+            if (w != conv && w.isNotEmpty() && w[0] in '\u0980'..'\u09FF') out.add(w)
         }
         return out.sortedBy { bnNorm(it).length }
     }
@@ -1023,9 +1036,12 @@ class KeyboardService : InputMethodService() {
         if (m != null) return if (w[0].isUpperCase() && !m[0].isUpperCase()) m.replaceFirstChar { it.uppercase() } else m
         if (lw.length < 3 || !lw.all { it in 'a'..'z' }) return null
         loadLearned()
-        if (dictSet.contains(lw) || learned.containsKey(lw)) return null
+        if (inDict(lw) || learned.containsKey(lw)) return null
         var best: String? = null
-        for (d in enList) {
+        // শুধু প্রথম ৩০,০০০ (সবচেয়ে প্রচলিত) শব্দে খুঁজি — তালিকা বড় হওয়ায় পুরোটা ঘোরানো ধীর ও অচেনা শব্দে ঠিক করার ঝুঁকি
+        val el = enList
+        for (k in 0 until minOf(el.size, 30000)) {
+            val d = el[k]
             if (d.length >= 3 && closeEdit(lw, d)) {
                 best = d
                 break
@@ -1046,10 +1062,13 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun avroFix(w: String): String? {
-        if (dictSet.contains(w)) return null
+        if (inDict(w)) return null
         loadLearned()
         if (learned.containsKey(w)) return null
-        val r = bnIndex[bnNorm(w)] ?: return null
+        val (src, idx) = bnNormIdx()
+        val rank = idx.lowestRankOf(bnNorm(w))
+        if (rank < 0) return null
+        val r = src[rank]
         return if (r != w) r else null
     }
 
@@ -2018,6 +2037,8 @@ class KeyboardService : InputMethodService() {
     // ================= Lifecycle =================
     override fun onCreate() {
         super.onCreate()
+        // বড় শব্দতালিকা (assets) ব্যাকগ্রাউন্ডে লোড; শেষ হলে বাংলা normalized index-ও আগেই বানিয়ে রাখি
+        WordData.loadAsync(this) { bnNormIdx() }
         val p = getSharedPreferences("kb", MODE_PRIVATE)
         themeMode = p.getInt("theme", 0)
         heightSet = p.getInt("height", 1)
