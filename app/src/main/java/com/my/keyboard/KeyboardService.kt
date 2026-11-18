@@ -975,22 +975,52 @@ class KeyboardService : InputMethodService() {
         return out.sortedBy { bnNorm(it).length }
     }
 
+    // সাজেশন বারে কয়টা ঘর: Avro টাইপ চলাকালীন ৫টি (১ম ঘর ইংরেজি), নইলে ৩টি
+    private val avroSlots = 5
+    private fun barSlots() = if (avroOn() && avroBuf.isNotEmpty()) avroSlots else 3
+
+    // বানানের রূপভেদ: ি↔ী, ু↔ূ, চ→চ্ছ (এবং এদের মিশ্রণ)। অভিধানে থাকা রূপ আগে।
+    private fun bnVariants(w: String): List<String> {
+        fun swap(s: String, a: Char, b: Char) =
+            buildString { for (c in s) append(if (c == a) b else if (c == b) a else c) }
+        val cch = "\u099A\u09CD\u099B" // চ্ছ
+        fun chh(s: String): String {
+            val i = s.indexOf('\u099A')
+            return if (i < 0 || s.startsWith(cch, i)) s else s.substring(0, i) + cch + s.substring(i + 1)
+        }
+        val i1 = swap(w, '\u09BF', '\u09C0') // ি ↔ ী
+        val u1 = swap(w, '\u09C1', '\u09C2') // ু ↔ ূ
+        val c1 = chh(w)
+        val out = LinkedHashSet<String>()
+        for (v in listOf(i1, u1, c1, chh(i1), chh(u1))) if (v != w) out.add(v)
+        return out.sortedBy { if (WordData.containsBn(it)) 0 else 1 }
+    }
+
     private fun candidates(n: Int = 3): List<String> {
         if (isPassword()) return emptyList()
         if (avroOn() && avroBuf.isNotEmpty()) {
-            val conv = avroConvert(avroBuf.toString())
+            // Samsung-এর মতো: ১ম ঘরে টাইপ করা ইংরেজি অক্ষর (নীল, চাপলে ইংরেজিই বসে), তারপর বাংলা রূপ,
+            // অভিধানের শব্দ, শেষে বানানের রূপভেদ (ি/ী, ু/ূ, চ/চ্ছ)
+            val raw = avroBuf.toString()
+            val conv = avroConvert(raw)
             val out = LinkedHashSet<String>()
+            out.add(raw)
             out.add(conv)
             out.addAll(bnFuzzy(conv))
+            out.addAll(bnVariants(conv))
             return out.take(n)
         }
         val w = currentWord()
         if (w.isEmpty()) {
-            val out = LinkedHashSet<String>(nextWords(previousWord(), n))
+            val out = LinkedHashSet<String>()
+            out.addAll(nextWords(previousWord(), n))
             for (s in starters()) out.add(s)
             return out.take(n)
         }
-        return matches(w).take(n)
+        val m = matches(w)
+        val out = LinkedHashSet<String>()
+        out.addAll(m)
+        return out.take(n)
     }
 
     // ---------- Auto replace ----------
@@ -1269,7 +1299,7 @@ class KeyboardService : InputMethodService() {
                 })
             }
         } else {
-            val list = if (suggestOn) candidates(3) else emptyList()
+            val list = if (suggestOn) candidates(barSlots()) else emptyList()
             for ((i, s) in list.withIndex()) {
                 if (i > 0) {
                     box.addView(View(this).apply {
@@ -1277,12 +1307,14 @@ class KeyboardService : InputMethodService() {
                         setBackgroundColor(0x44888888)
                     })
                 }
+                val rawSlot = i == 0 && avroOn() && avroBuf.isNotEmpty() // Avro-র ১ম ঘর = ইংরেজি অক্ষর
                 box.addView(TextView(this).apply {
                     text = s
                     textSize = 16f
                     maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
                     gravity = Gravity.CENTER
-                    setTextColor(enLetterCol())
+                    setTextColor(if (rawSlot) 0xFF2F80ED.toInt() else enLetterCol())
                     typeface = faceFor(text)
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
                     setOnClickListener { pick(s) }
@@ -1364,10 +1396,13 @@ class KeyboardService : InputMethodService() {
         sugExpanded = false
         if (avroOn() && avroBuf.isNotEmpty()) {
             val prev = previousWord()
+            val isRaw = s == avroBuf.toString() // ইংরেজি অক্ষরই বেছে নিলে বাংলা শব্দ হিসেবে শেখা হয় না
             ic.commitText(s + " ", 1)
             avroBuf.setLength(0)
-            learn(s)
-            learnBigram(prev, s)
+            if (!isRaw) {
+                learn(s)
+                learnBigram(prev, s)
+            }
         } else {
             val prev = previousWord()
             val w = currentWord()
@@ -2380,7 +2415,7 @@ class KeyboardService : InputMethodService() {
             }
             setPadding(dp(4), dp(4), dp(4), dp(6))
         }
-        val list = candidates(12).drop(3)
+        val list = candidates(12).drop(barSlots())
         if (list.isEmpty()) {
             card.addView(TextView(this).apply {
                 text = "No more suggestions"
