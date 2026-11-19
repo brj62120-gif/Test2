@@ -66,6 +66,12 @@ class KeyboardService : InputMethodService() {
     // 0 = none, 1 = emoji, 2 = clipboard, 3 = text editing, 4 = settings, 5 = more, 6 = emoji search, 7 = modes
     private var panel = 0
     private var emojiCat = 1
+
+    // সংখ্যার ঘর (number / phone / date-time / ভেরিফিকেশন কোড) হলে শুধু ০–৯ + মুছা + Go দেখায়
+    private var numPad = false
+    private var numExtras: List<String> = emptyList()
+    private var numActionLabel = "↵"
+    private val SEARCH_MARK = "@search"
     private var emojiSlide = 0
     private var emojiRipple = false
     private var selecting = false
@@ -2121,6 +2127,7 @@ class KeyboardService : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         hintAt = 0L
+        updateNumPad(info)
         if (::root.isInitialized) {
             // symbol পেজ থেকে কিবোর্ড বন্ধ করলে, আবার খুললে ওই ভাষারই অক্ষরের পেজ আসবে
             // (English symbol → English, বাংলা symbol → বাংলা)
@@ -2156,6 +2163,67 @@ class KeyboardService : InputMethodService() {
                     .setInterpolator(DecelerateInterpolator()).start()
             }
         }
+    }
+
+    // ঘরের ধরন দেখে সংখ্যা-প্যাড লাগবে কি না ঠিক করে, আর Go/Next/Done... বোতামের লেখা বসায়
+    private fun updateNumPad(info: EditorInfo?) {
+        val t = info?.inputType ?: 0
+        val cls = t and InputType.TYPE_MASK_CLASS
+        numPad = cls == InputType.TYPE_CLASS_NUMBER ||
+            cls == InputType.TYPE_CLASS_PHONE ||
+            cls == InputType.TYPE_CLASS_DATETIME
+        numExtras = when (cls) {
+            InputType.TYPE_CLASS_PHONE -> listOf("+", "*", "#")
+            InputType.TYPE_CLASS_DATETIME -> listOf("/", ":", "-")
+            InputType.TYPE_CLASS_NUMBER -> buildList {
+                if (t and InputType.TYPE_NUMBER_FLAG_SIGNED != 0) add("-")
+                if (t and InputType.TYPE_NUMBER_FLAG_DECIMAL != 0) add(".")
+            }
+            else -> emptyList()
+        }
+        // Enter বোতাম: অ্যাপ যা চায় (Go / Search 🔍 / Next / Done / Send), নইলে সাধারণ ↵
+        val ime = info?.imeOptions ?: 0
+        val multiLine = cls == InputType.TYPE_CLASS_TEXT &&
+            (t and InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0
+        val custom = info?.actionLabel?.toString()
+        numActionLabel = when {
+            multiLine || (ime and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0 -> "↵"
+            !custom.isNullOrBlank() -> custom
+            else -> when (ime and EditorInfo.IME_MASK_ACTION) {
+                EditorInfo.IME_ACTION_GO -> "Go"
+                EditorInfo.IME_ACTION_NEXT -> "Next"
+                EditorInfo.IME_ACTION_DONE -> "Done"
+                EditorInfo.IME_ACTION_SEARCH -> SEARCH_MARK
+                EditorInfo.IME_ACTION_SEND -> "Send"
+                EditorInfo.IME_ACTION_PREVIOUS -> "Prev"
+                else -> "↵"
+            }
+        }
+    }
+
+    // Enter বোতাম তৈরি: Search হলে magnifier আইকন, লেখা হলে নীল, সাধারণ ↵ হলে ধূসর
+    private fun enterKey(w: Float, onTap: () -> Unit): View =
+        if (numActionLabel == SEARCH_MARK) fnIcon(21, w, onTap)
+        else key(numActionLabel, w, fn = true, accent = numActionLabel != "↵") { onTap() }
+
+    // সংখ্যা-প্যাড: ১ম সারিতে ০–৯, ২য় সারিতে (থাকলে) + * # . - ইত্যাদি, মুছা ও Go
+    private fun renderNumPad() {
+        val digits = newLine()
+        for (d in "1234567890") {
+            digits.addView(key(d.toString()) {
+                currentInputConnection?.commitText(d.toString(), 1)
+            })
+        }
+        root.addView(digits)
+        val line = newLine()
+        for (x in numExtras) {
+            line.addView(key(x) { currentInputConnection?.commitText(x, 1) })
+        }
+        line.addView(backKey(2.5f))
+        line.addView(enterKey(3f) {
+            if (!sendDefaultEditorAction(true)) sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
+        })
+        root.addView(line)
     }
 
     // landscape এ extract (পুরো স্ক্রিন) মোড বন্ধ: নইলে YouTube/Chrome এর লেখার ঘর ঢাকা পড়ে
@@ -2245,7 +2313,7 @@ class KeyboardService : InputMethodService() {
         // emoji-search (panel 6) এর নিজস্ব বড় লেআউট; বাকি সব প্যানেলে উচ্চতা স্থির
         val rlp = root.layoutParams
         if (rlp != null) {
-            val want = if (panel == 6) WC else dp(kbTotalDp())
+            val want = if (panel == 6 || numPad) WC else dp(kbTotalDp())
             if (rlp.height != want) {
                 rlp.height = want
                 root.layoutParams = rlp
@@ -2266,6 +2334,10 @@ class KeyboardService : InputMethodService() {
             selected.clear()
         }
         if (panel != 3) selecting = false
+        if (numPad) {
+            renderNumPad()
+            return
+        }
         when (panel) {
             1 -> { root.addView(toolbarRow()); renderEmoji(); return }
             2 -> { root.addView(toolbarRow()); renderClipboard(); return }
@@ -3371,7 +3443,7 @@ class KeyboardService : InputMethodService() {
         if (panel == 6) {
             line.addView(fnIcon(21, 1.5f) { })
         } else {
-            line.addView(key("↵", 1.5f, fn = true) { enter() })
+            line.addView(enterKey(1.5f) { enter() })
         }
         return line
     }
