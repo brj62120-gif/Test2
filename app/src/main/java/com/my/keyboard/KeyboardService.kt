@@ -490,10 +490,10 @@ class KeyboardService : InputMethodService() {
         if (sound) v.playSoundEffect(SoundEffectConstants.CLICK)
     }
 
-    private fun fnIcon(kind: Int, weight: Float, onTap: () -> Unit): View {
+    private fun fnIcon(kind: Int, weight: Float, hDp: Int = 0, onTap: () -> Unit): View {
         val v = IconView(kind)
         v.background = bg(fnBg())
-        v.layoutParams = LinearLayout.LayoutParams(0, dp(keyH()), weight).apply {
+        v.layoutParams = LinearLayout.LayoutParams(0, dp(if (hDp > 0) hDp else keyH()), weight).apply {
             setMargins(dp(2), dp(vm()), dp(2), dp(vm()))
         }
         v.setOnClickListener {
@@ -2202,27 +2202,44 @@ class KeyboardService : InputMethodService() {
     }
 
     // Enter বোতাম তৈরি: Search হলে magnifier আইকন, লেখা হলে নীল, সাধারণ ↵ হলে ধূসর
-    private fun enterKey(w: Float, onTap: () -> Unit): View =
-        if (numActionLabel == SEARCH_MARK) fnIcon(21, w, onTap)
-        else key(numActionLabel, w, fn = true, accent = numActionLabel != "↵") { onTap() }
+    private fun enterKey(w: Float, hDp: Int = 0, onTap: () -> Unit): View =
+        if (numActionLabel == SEARCH_MARK) fnIcon(21, w, hDp, onTap)
+        else key(numActionLabel, w, fn = true, accent = numActionLabel != "↵", hDp = hDp) { onTap() }
 
-    // সংখ্যা-প্যাড: ১ম সারিতে ০–৯, ২য় সারিতে (থাকলে) + * # . - ইত্যাদি, মুছা ও Go
+    // সংখ্যা-প্যাড (৪×৪): ১ ২ ৩ ⌫ / ৪ ৫ ৬ Go / ৭ ৮ ৯ চিহ্ন / চিহ্ন ০ চিহ্ন চিহ্ন
+    // উচ্চতা বাংলা/ইংরেজি/Avro কিবোর্ডের সমান; ফাঁকা ঘরগুলো ধূসর ও নিষ্ক্রিয়
     private fun renderNumPad() {
-        val digits = newLine()
-        for (d in "1234567890") {
-            digits.addView(key(d.toString()) {
-                currentInputConnection?.commitText(d.toString(), 1)
-            })
+        val rowH = ((kbTotalDp() - padT() - padB()) / 4 - 2 * vm()).coerceAtLeast(30)
+        val extras = (numExtras + listOf("", "", "", "")).take(4)
+        fun digit(d: Char): View = key(d.toString(), sp = 28f, hDp = rowH) {
+            currentInputConnection?.commitText(d.toString(), 1)
         }
-        root.addView(digits)
-        val line = newLine()
-        for (x in numExtras) {
-            line.addView(key(x) { currentInputConnection?.commitText(x, 1) })
-        }
-        line.addView(backKey(2.5f))
-        line.addView(enterKey(3f) {
+        fun extra(x: String): View =
+            if (x.isEmpty()) key("", fn = true, hDp = rowH) { }
+            else key(x, fn = true, sp = 24f, hDp = rowH) { currentInputConnection?.commitText(x, 1) }
+
+        var line = newLine()
+        for (d in "123") line.addView(digit(d))
+        line.addView(key("⌫", fn = true, repeat = true, hDp = rowH, onHold = { backspaceHold(it) }) { backspace() })
+        root.addView(line)
+
+        line = newLine()
+        for (d in "456") line.addView(digit(d))
+        line.addView(enterKey(1f, rowH) {
             if (!sendDefaultEditorAction(true)) sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
         })
+        root.addView(line)
+
+        line = newLine()
+        for (d in "789") line.addView(digit(d))
+        line.addView(extra(extras[0]))
+        root.addView(line)
+
+        line = newLine()
+        line.addView(extra(extras[1]))
+        line.addView(digit('0'))
+        line.addView(extra(extras[2]))
+        line.addView(extra(extras[3]))
         root.addView(line)
     }
 
@@ -2313,7 +2330,7 @@ class KeyboardService : InputMethodService() {
         // emoji-search (panel 6) এর নিজস্ব বড় লেআউট; বাকি সব প্যানেলে উচ্চতা স্থির
         val rlp = root.layoutParams
         if (rlp != null) {
-            val want = if (panel == 6 || numPad) WC else dp(kbTotalDp())
+            val want = if (panel == 6) WC else dp(kbTotalDp())
             if (rlp.height != want) {
                 rlp.height = want
                 root.layoutParams = rlp
